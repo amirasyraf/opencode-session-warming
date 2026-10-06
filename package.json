@@ -1,0 +1,19 @@
+{
+  "name": "opencode-session-warming",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Best-effort root-session Codex HTTP cache warming for OpenCode v1.18.30",
+  "engines": { "node": ">=22.18.0" },
+  "scripts": {
+    "test": "node --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test",
+    "test:runtime": "node --test tests/runtime.integration.ts"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "1.18.30",
+    "@types/node": "26.0.0",
+    "typescript": "5.9.3"
+  }
+}
