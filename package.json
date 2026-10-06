@@ -9,11 +9,16 @@
     "test": "node --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm test",
-    "test:runtime": "node --test tests/runtime.integration.ts"
+    "test:runtime": "node --test tests/runtime.integration.ts",
+    "test:tui": "node --test tests/tui.integration.ts"
   },
   "devDependencies": {
     "@opencode-ai/plugin": "1.18.30",
+    "@opentui/core": "0.4.5",
+    "@opentui/keymap": "0.4.5",
+    "@opentui/solid": "0.4.5",
     "@types/node": "26.0.0",
+    "solid-js": "1.9.12",
     "typescript": "5.9.3"
   }
 }

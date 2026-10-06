@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { CAPTURE_HEADER, KEEPALIVE, captureRequest, discardWarmResponse, retryAfterMs, warmRequest } from "../protocol.ts"
+import { CAPTURE_HEADER, KEEPALIVE, captureRequest, classifyRequest, discardWarmResponse, retryAfterMs, warmRequest } from "../protocol.ts"
 import { completedResponse, ordinary, requestBody } from "./helpers.ts"
 
 test("replay preserves cache prefix, reasoning and tool definitions without request mutation", () => {
@@ -54,6 +54,13 @@ test("warm response parses split CRLF metadata and treats missing usage as unkno
   assert.equal(await discardWarmResponse(completedResponse(null), new AbortController().signal), undefined)
 })
 
+test("successful JSON and empty responses are valid warm completions", async () => {
+  const json = new Response(JSON.stringify({ usage: { input_tokens: 12, output_tokens: 1,
+    input_tokens_details: { cached_tokens: 10 } } }), { headers: { "content-type": "application/json" } })
+  assert.deepEqual(await discardWarmResponse(json, new AbortController().signal), { inputTokens: 12, cachedTokens: 10, outputTokens: 1 })
+  assert.deepEqual(await discardWarmResponse(new Response(null, { status: 200 }), new AbortController().signal), undefined)
+})
+
 test("warm stream error, truncation, oversized frame and abort are failures", async () => {
   for (const body of [
     'data: {"type":"response.failed"}\n\n',
@@ -83,4 +90,12 @@ test("request and SSE-frame limits count multibyte UTF-8 bytes", async () => {
   assert.ok(frame.length < 1024 * 1024)
   await assert.rejects(discardWarmResponse(new Response(frame, { headers: { "content-type": "text/event-stream" } }),
     new AbortController().signal), /warm-frame-too-large/)
+})
+
+test("unsupported capture shapes report specific reasons without their content", () => {
+  const [url, init] = ordinary()
+  assert.equal(classifyRequest("https://api.openai.com/v1/responses", init).reason, "unsupported-endpoint")
+  assert.equal(classifyRequest(url, { ...init, body: JSON.stringify({ ...requestBody, tools: [{ type: "web_search" }] }) }).reason, "unsupported-tools")
+  assert.equal(classifyRequest(url, { ...init, body: JSON.stringify({ ...requestBody, conversation: "secret-conversation" }) }).reason, "stateful-request")
+  assert.equal(classifyRequest(url, { ...init, body: "secret-invalid-json" }).reason, "invalid-json-or-headers")
 })

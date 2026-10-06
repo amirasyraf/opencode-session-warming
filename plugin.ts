@@ -1,7 +1,10 @@
 import type { Plugin } from "@opencode-ai/plugin"
-import { WarmingEngine, settings } from "./engine.ts"
+import { WarmingEngine, settings, settingsError } from "./engine.ts"
+import { createDiagnostics, errorDetails, within } from "./diagnostics.ts"
+import type { Diagnostic } from "./diagnostics.ts"
 import { CAPTURE_HEADER } from "./protocol.ts"
 import { transport } from "./transport.ts"
+import { StatusPublisher } from "./status.ts"
 
 const hiddenAgents = new Set(["title", "summary"])
 const flag = (name: string) => ["true", "1"].includes(process.env[name] ?? "")
@@ -9,16 +12,17 @@ const flag = (name: string) => ["true", "1"].includes(process.env[name] ?? "")
 const plugin: Plugin = async ({ client }, options = {}) => {
   const prepared = new Map<string, { messageID: string; token?: string }>()
   const reverts = new Map<string, string>()
-  const diagnostic = (extra: Record<string, string | number | boolean | undefined>) => {
+  const log = createDiagnostics((entry, signal) => client.app.log({ body: entry, signal }), { debug: options.debug === true })
+  const diagnostic = (extra: Diagnostic) => {
     if (extra.event === "stopped" && typeof extra.sessionID === "string") {
       prepared.delete(extra.sessionID)
       reverts.delete(extra.sessionID)
     }
-    void client.app.log({ body: { service: "session-warming", level: "info", message: String(extra.event), extra } }).catch(() => {})
+    log(extra)
   }
   const config = settings(options)
   if (!config || !config.enabled) {
-    if (!config) diagnostic({ event: "disabled", reason: "invalid-options" })
+    diagnostic({ event: "disabled", reason: !config ? settingsError(options) : "configured-off" })
     return {}
   }
   if (flag("OPENCODE_EXPERIMENTAL_NATIVE_LLM") || flag("OPENCODE_EXPERIMENTAL_WEBSOCKETS") ||
@@ -26,7 +30,12 @@ const plugin: Plugin = async ({ client }, options = {}) => {
     diagnostic({ event: "disabled", reason: "unsupported-transport" })
     return {}
   }
-  const engine = new WarmingEngine(config, transport(), diagnostic)
+  let engine: WarmingEngine
+  const publisher = new StatusPublisher(diagnostic)
+  try { engine = new WarmingEngine(config, transport(), diagnostic, undefined, (status) => publisher.publish(status)) }
+  catch (error) { diagnostic({ event: "internal-error", reason: "initialization-failed", ...errorDetails(error) }); return {} }
+  diagnostic({ event: "ready", version: "1.18.30", providerID: "openai", intervalMs: config.intervalMs,
+    durationMs: config.durationMs, timeoutMs: 30000, metadataTimeoutMs: 5000 })
   let disposed = false
   const clear = (id: string, reason: string) => {
     prepared.delete(id)
@@ -41,14 +50,23 @@ const plugin: Plugin = async ({ client }, options = {}) => {
       const preparation = { messageID: input.message.id, token: undefined as string | undefined }
       prepared.set(input.sessionID, preparation)
       try {
-        const result = await client.session.get({ path: { id: input.sessionID } })
+        const result = await within((signal) => client.session.get({ path: { id: input.sessionID }, signal }), 5000, "metadata-timeout")
         if (disposed || prepared.get(input.sessionID) !== preparation) return
-        if (!result.data || result.data.parentID) { prepared.delete(input.sessionID); return }
+        if (!result.data) {
+          prepared.delete(input.sessionID)
+          diagnostic({ event: "skipped", sessionID: input.sessionID, reason: "session-metadata-unavailable", status: result.response?.status })
+          return
+        }
+        if (result.data.parentID) { prepared.delete(input.sessionID); return }
         // Conservative guard for sessions created by unsupported/pre-release versions.
         const supported = result.data.version === "1.18.30" && input.model.providerID === "openai" && input.agent !== "compaction"
         if (!supported) {
           prepared.delete(input.sessionID)
-          diagnostic({ event: "skipped", sessionID: input.sessionID, reason: "unsupported-provider-or-session-version" })
+          diagnostic({ event: "skipped", sessionID: input.sessionID, providerID: input.model.providerID,
+            version: result.data.version, reason: result.data.version !== "1.18.30" ? "unsupported-session-version" :
+              input.agent === "compaction" ? "compaction" : "unsupported-provider" })
+          engine.inactive(input.sessionID, result.data.version !== "1.18.30" ? "unsupported-session-version" :
+            input.agent === "compaction" ? "compaction" : "unsupported-provider")
           return
         }
         const token = engine.prepare(input.sessionID, true)
@@ -56,9 +74,10 @@ const plugin: Plugin = async ({ client }, options = {}) => {
           preparation.token = token
           reverts.set(input.sessionID, JSON.stringify(result.data.revert ?? null))
         }
-      } catch {
-        if (prepared.get(input.sessionID) === preparation) prepared.delete(input.sessionID)
-        diagnostic({ event: "skipped", sessionID: input.sessionID, reason: "session-metadata-unavailable" })
+      } catch (error) {
+        if (disposed || prepared.get(input.sessionID) !== preparation) return
+        prepared.delete(input.sessionID)
+        diagnostic({ event: "skipped", sessionID: input.sessionID, reason: "session-metadata-unavailable", ...errorDetails(error) })
       }
     },
     "chat.headers": async (input, output) => {
@@ -90,6 +109,9 @@ const plugin: Plugin = async ({ client }, options = {}) => {
     dispose: async () => {
       disposed = true
       engine.dispose()
+      await within(() => publisher.dispose(), 2000, "metadata-timeout").catch((error: unknown) => {
+        diagnostic({ event: "ui-status-failed", reason: "cleanup-failed", ...errorDetails(error) })
+      })
       prepared.clear()
       reverts.clear()
     },

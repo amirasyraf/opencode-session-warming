@@ -1,9 +1,22 @@
 import assert from "node:assert/strict"
-import { test } from "node:test"
+import { after, test } from "node:test"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { setTimeout as sleep } from "node:timers/promises"
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import plugin from "../plugin.ts"
 import { CAPTURE_HEADER } from "../protocol.ts"
 import { completedResponse, ordinary } from "./helpers.ts"
+
+const stateHome = await mkdtemp(join(tmpdir(), "warming-plugin-unit-"))
+const previousStateHome = process.env.XDG_STATE_HOME
+process.env.XDG_STATE_HOME = stateHome
+after(async () => {
+  if (previousStateHome === undefined) delete process.env.XDG_STATE_HOME
+  else process.env.XDG_STATE_HOME = previousStateHome
+  await rm(stateHome, { recursive: true, force: true })
+})
 
 type Input = Parameters<NonNullable<Hooks["chat.params"]>>[0]
 const input = (sessionID = "root", agent = "build", providerID = "openai", messageID = "user") => ({
@@ -22,7 +35,7 @@ async function harness(get?: (id: string) => Promise<unknown>) {
     } }) },
     app: { log: async ({ body }: { body: { extra: Record<string, unknown> } }) => { logs.push(body.extra) } },
   }
-  const hooks = await plugin({ client } as unknown as PluginInput, { intervalMs: 60000, durationMs: 120000 })
+  const hooks = await plugin({ client } as unknown as PluginInput, { intervalMs: 60000, durationMs: 120000, debug: true })
   async function headers(value = input()) {
     await hooks["chat.params"]!(value, params)
     const out = { headers: {} as Record<string, string> }
@@ -107,4 +120,24 @@ test("unsupported transports and invalid options emit no capture hooks", async (
     else process.env.OPENCODE_EXPERIMENTAL_WEBSOCKETS = old
   }
   assert.deepEqual(await plugin({ client } as unknown as PluginInput, { intervalMs: -1 }), {})
+})
+
+test("startup logs effective configuration and distinguishes unsupported providers", async () => {
+  const h = await harness()
+  await h.headers(input("root", "build", "google"))
+  const ready = h.logs.find((entry) => entry.event === "ready")!
+  assert.equal(ready.intervalMs, 60000)
+  assert.equal(ready.durationMs, 120000)
+  assert.ok(h.logs.some((entry) => entry.reason === "unsupported-provider"))
+  await h.hooks.dispose!()
+})
+
+test("metadata lookup cannot indefinitely block the parent request", { timeout: 7000 }, async () => {
+  const h = await harness(async () => new Promise(() => {}))
+  await Promise.all([h.headers(), sleep(5100)]) // Keep the test event loop alive while production timers are unref'ed.
+  assert.ok(h.logs.some((entry) => entry.reason === "session-metadata-unavailable" && entry.errorCode === "metadata-timeout"))
+  const out = { headers: {} }
+  await h.hooks["chat.headers"]!(input(), out)
+  assert.deepEqual(out.headers, {})
+  await h.hooks.dispose!()
 })

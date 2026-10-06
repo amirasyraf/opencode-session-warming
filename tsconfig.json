@@ -10,8 +10,10 @@
     "verbatimModuleSyntax": true,
     "erasableSyntaxOnly": true,
     "skipLibCheck": true,
+    "jsx": "preserve",
+    "jsxImportSource": "@opentui/solid",
     "noUnusedLocals": true,
     "noUnusedParameters": true
   },
-  "include": ["*.ts", "tests/**/*.ts"]
+  "include": ["*.ts", "*.tsx", "tests/**/*.ts"]
 }

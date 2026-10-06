@@ -2,13 +2,14 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import { createServer } from "node:http"
 import type { ServerResponse } from "node:http"
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises"
+import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { spawn, spawnSync } from "node:child_process"
 import { setTimeout as sleep } from "node:timers/promises"
 import { CAPTURE_HEADER, KEEPALIVE } from "../protocol.ts"
+import { readStatus } from "../status.ts"
 
 const project = resolve(fileURLToPath(new URL("..", import.meta.url)))
 const encoder = (type: string, fields: Record<string, unknown>) => `event: ${type}\ndata: ${JSON.stringify({ type, ...fields })}\n\n`
@@ -125,29 +126,33 @@ test("installed v1 warms blocked parents, preserves OAuth, and stops on cancella
     child.stdout!.on("data", (chunk) => { processLogs = (processLogs + chunk).slice(-16000) })
     child.stderr!.on("data", (chunk) => { processLogs = (processLogs + chunk).slice(-16000) })
     const base = `http://127.0.0.1:${port}`
-    async function api(path: string, body?: unknown) {
+    async function api(path: string, body?: unknown, timeoutMs = 45000) {
       const response = await fetch(base + path, { method: body === undefined ? "GET" : "POST",
         headers: { "content-type": "application/json", "x-opencode-directory": worktree },
-        body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.any([AbortSignal.timeout(45000), t.signal]) })
+        body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.any([AbortSignal.timeout(timeoutMs), t.signal]) })
       assert.ok(response.ok, `${path}: HTTP ${response.status}: ${await (response.ok ? Promise.resolve("") : response.text())}`)
       return response.json() as Promise<Record<string, unknown>>
     }
     async function waitFor(check: () => boolean | Promise<boolean>, description: string, timeout = 45000) {
       const end = Date.now() + timeout
+      let lastError: unknown
       while (Date.now() < end) {
         if (child!.exitCode !== null) throw new Error(`OpenCode exited: ${processLogs}`)
-        try { if (await check()) return } catch (error) { if (child!.exitCode !== null) throw error }
+        try { if (await check()) return } catch (error) { lastError = error; if (child!.exitCode !== null) throw error }
         await sleep(50)
       }
-      throw new Error(`Timed out waiting for ${description}\n${processLogs}`)
+      throw new Error(`Timed out waiting for ${description}: ${String(lastError)}\n${processLogs}`, { cause: lastError })
     }
-    await waitFor(async () => (await api("/global/health")).version === "1.18.30", "server health")
+    await waitFor(async () => (await api("/global/health", undefined, 2000)).version === "1.18.30", "server health")
     const session = await api("/session", { title: "warming integration" })
     const id = String(session.id)
     parents.add(id)
     const prompt = api(`/session/${id}/message`, { model: { providerID: "openai", modelID: "gpt-5.4" },
       parts: [{ type: "text", text: "integration-parent: delegate to slow-child and wait" }] })
     await waitFor(() => requests.some((request) => request.session === id && request.warm), "parent warming during foreground task")
+    const statusPath = join(home, "state", "opencode", "session-warming", "status")
+    await waitFor(async () => ((await readStatus(id, statusPath)).status?.attempted ?? 0) >= 1, "published warming progress")
+    assert.equal((await readFile(join(statusPath, `${id}.json`), "utf8")).includes("integration-only"), false)
     const status = await api("/session/status")
     assert.equal((status[id] as { type: string }).type, "busy")
     assert.equal(notifications.includes(id), false, "warming must not emit idle/task-completion events")

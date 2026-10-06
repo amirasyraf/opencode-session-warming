@@ -1,6 +1,8 @@
 import { CAPTURE_HEADER } from "./protocol.ts"
+import { errorDetails } from "./diagnostics.ts"
 
-type Complete = (ok: boolean) => void
+type Failure = { reason?: string; status?: number; errorCategory?: string; errorCode?: string }
+type Complete = (ok: boolean, failure?: Failure) => void
 export type Observation = { complete?: Complete }
 export type Capture = (url: string, init: RequestInit) => Observation | undefined
 export type Transport = {
@@ -30,25 +32,25 @@ function responseView(original: Response, bodyResponse: Response, headers = orig
   })
 }
 
-function complete(observation: Observation, ok: boolean) {
+function complete(observation: Observation, ok: boolean, failure?: Failure) {
   const callback = observation.complete
   observation.complete = undefined
-  try { callback?.(ok) } catch { /* Plugin observation never fails ordinary traffic. */ }
+  try { callback?.(ok, failure) } catch { /* Plugin observation never fails ordinary traffic. */ }
 }
 
 export function observeResponse(response: Response, signal: AbortSignal | null | undefined, observation: Observation): Response {
   if (!response.body) { complete(observation, response.ok); return response }
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
   let finished = false
-  const finish = (ok: boolean) => {
+  const finish = (ok: boolean, failure?: Failure) => {
     if (finished) return
     finished = true
     signal?.removeEventListener("abort", aborted)
-    complete(observation, ok)
+    complete(observation, ok, failure)
   }
-  const aborted = () => finish(false)
+  const aborted = () => finish(false, { reason: "ordinary-aborted" })
   signal?.addEventListener("abort", aborted, { once: true })
-  if (signal?.aborted) finish(false)
+  if (signal?.aborted) aborted()
   const stream = new ReadableStream<Uint8Array>({
     async pull(controller) {
       try {
@@ -60,13 +62,13 @@ export function observeResponse(response: Response, signal: AbortSignal | null |
           controller.close()
         } else controller.enqueue(chunk.value)
       } catch (error) {
-        finish(false)
+        finish(false, { reason: "ordinary-stream-error", ...errorDetails(error) })
         reader?.releaseLock()
         controller.error(error)
       }
     },
     async cancel(reason) {
-      finish(false)
+      finish(false, { reason: "ordinary-stream-cancelled" })
       if (reader) {
         try { await reader.cancel(reason) } finally { reader.releaseLock() }
       } else await response.body!.cancel(reason)
@@ -98,10 +100,15 @@ export function transport(): Transport {
     try {
       const response = await original(input, clean)
       if (!observation) return response
-      if (!response.ok) { complete(observation, false); return response }
-      return observeResponse(response, clean.signal ?? (input instanceof Request ? input.signal : undefined), observation)
+      if (!response.ok) { complete(observation, false, { reason: "ordinary-http-error", status: response.status }); return response }
+      try {
+        return observeResponse(response, clean.signal ?? (input instanceof Request ? input.signal : undefined), observation)
+      } catch (error) {
+        complete(observation, false, { reason: "observer-failed", ...errorDetails(error) })
+        return response
+      }
     } catch (error) {
-      if (observation) complete(observation, false)
+      if (observation) complete(observation, false, { reason: "ordinary-fetch-error", ...errorDetails(error) })
       throw error
     }
   }) as typeof fetch
