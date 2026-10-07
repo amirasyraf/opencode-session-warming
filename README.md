@@ -169,8 +169,7 @@ status rather than inventing progress.
 | `intervalMs` | automatic | Optional global refresh interval; omit to select the provider/model/request profile below. |
 | `durationMs` | `3600000` (1 hour) | Maximum warming window after the latest ordinary root-model request starts. |
 | `debug` | `false` | Include routine scheduling, attempt-start, and ordinary-usage events at debug level. |
-| `providers` | none | Exact provider-ID overrides for `intervalMs` and `enabled`. |
-| `models` | none | Exact `providerID/api-model-ID` overrides for `intervalMs` and `enabled`. |
+| `providers` | none | Exact provider-ID overrides for `intervalMs`, `enabled`, and nested model overrides. |
 
 The one-hour default covers long subagent waits. Supplied time settings must be
 positive safe integers, at most `2147483647` milliseconds, with `intervalMs`
@@ -197,24 +196,32 @@ provider's behavior; Codex/Copilot retention and real cache benefit have not bee
 verified by live tests. The shortest captured Claude marker controls mixed-TTL
 scheduling. Retention metadata is not a measured cache-expiry countdown.
 
-Overrides are resolved independently for each setting: **model → provider →
+Overrides are nested under their provider and resolved independently for each setting: **model → provider →
 explicit global → automatic**. An explicit existing `intervalMs: 240000` retains
 its four-minute cadence; remove it to use automatic defaults. Models use actual
-API IDs, including any version suffix; no wildcard matching is performed.
+API IDs, including any version suffix; no wildcard matching is performed. At most
+128 providers and 128 models per provider are accepted.
 The global `enabled: false` always disables the plugin. A model can re-enable
-warming disabled by its provider override. At most 128 entries per override map
-are accepted. Intervals at or above the profile TTL emit `policy-warning` rather
+warming disabled by its provider override. Intervals at or above the profile TTL emit `policy-warning` rather
 than silently clamping the configured value. Overrides never change provider TTLs.
 
 ```jsonc
 {
   "durationMs": 3600000,
   "providers": {
-    "github-copilot": { "intervalMs": 1680000 }
-  },
-  "models": {
-    "github-copilot/claude-sonnet-5": { "intervalMs": 240000 },
-    "github-copilot/claude-opus-5": { "enabled": false }
+    "openai": {
+      "models": {
+        "gpt-5.6-luna": {}
+      }
+    },
+    "github-copilot": {
+      "intervalMs": 1680000,
+      "models": {
+        "gpt-5.6-luna": {},
+        "claude-sonnet-5": { "intervalMs": 240000 },
+        "claude-opus-5": { "enabled": false }
+      }
+    }
   }
 }
 ```

@@ -129,10 +129,10 @@ test("unsupported Claude shapes fail closed without leaking data", () => {
 })
 
 test("policy overrides are exact, independently inherited, validated and copied", () => {
-  const options = { intervalMs: 300000, providers: { "github-copilot": { enabled: false, intervalMs: 250000 } },
-    models: { "github-copilot/gpt-5.6-sol": { enabled: true, intervalMs: 200000 } } }
+  const options = { intervalMs: 300000, providers: { "github-copilot": { enabled: false, intervalMs: 250000,
+    models: { "gpt-5.6-sol": { enabled: true, intervalMs: 200000 } } } } }
   const config = settings(options)!
-  options.models["github-copilot/gpt-5.6-sol"].intervalMs = 1
+  options.providers["github-copilot"].models["gpt-5.6-sol"].intervalMs = 1
   const auto = { intervalMs: 1680000, ttlMs: 1800000, ttlEvidence: "upstream-assumed" as const }
   const exact = resolvePolicy(config, "github-copilot", "gpt-5.6-sol", auto)
   assert.equal(exact.intervalMs, 200000)
@@ -143,5 +143,7 @@ test("policy overrides are exact, independently inherited, validated and copied"
   assert.equal(resolvePolicy(settings()!, "openai", "gpt-6", auto).intervalMs, 1680000)
   assert.equal(resolvePolicy(settings()!, "github-copilot", "constructor", auto).enabled, true)
   for (const invalid of [{ providers: [] }, { models: { "gpt-6": {} } }, { providers: { "github-copilot": { ttlMs: 100 } } },
-    { models: { "openai/gpt-6": { intervalMs: Infinity } } }, { providers: { openai: { enabled: "yes" } } }]) assert.equal(settings(invalid), undefined)
+    { providers: { "github-copilot": { models: { "gpt-6/extra": {} } } } },
+    { providers: { "github-copilot": { models: { "gpt-6": { intervalMs: Infinity } } } } },
+    { providers: { openai: { enabled: "yes" } } }]) assert.equal(settings(invalid), undefined)
 })

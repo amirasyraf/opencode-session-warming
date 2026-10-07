@@ -1,9 +1,10 @@
 import { object } from "./protocol.ts"
 
 export type Override = { enabled?: boolean; intervalMs?: number }
+export type ProviderOverride = Override & { models?: Record<string, Override> }
 export type Settings = Override & {
   enabled: boolean; durationMs: number; debug?: boolean
-  providers?: Record<string, Override>; models?: Record<string, Override>
+  providers?: Record<string, ProviderOverride>
 }
 export type CacheProfile = {
   ttlMs?: number; ttlEvidence: "documented" | "upstream-assumed" | "requested"
@@ -18,23 +19,26 @@ const identifier = /^[A-Za-z0-9_.-]{1,160}$/
 const timer = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= MAX_TIMER
 
 export function settingsError(options: Record<string, unknown> = {}): string | undefined {
-  if (Object.keys(options).some((key) => !["enabled", "intervalMs", "durationMs", "debug", "providers", "models"].includes(key))) return "unknown-option"
+  if (Object.keys(options).some((key) => !["enabled", "intervalMs", "durationMs", "debug", "providers"].includes(key))) return "unknown-option"
   if (options.enabled !== undefined && typeof options.enabled !== "boolean") return "invalid-enabled"
   if (options.debug !== undefined && typeof options.debug !== "boolean") return "invalid-debug"
   const duration = options.durationMs ?? 3_600_000
   if (!timer(duration)) return "invalid-duration"
   if (options.intervalMs !== undefined && !timer(options.intervalMs)) return "invalid-interval"
   if (typeof options.intervalMs === "number" && options.intervalMs >= (duration as number)) return "interval-not-less-than-duration"
-  for (const name of ["providers", "models"] as const) {
-    const overrides = options[name]
-    if (overrides === undefined) continue
-    if (!object(overrides) || Object.keys(overrides).length > 128) return "invalid-overrides"
-    for (const [key, value] of Object.entries(overrides)) {
-      const parts = key.split("/")
-      if (parts.length !== (name === "models" ? 2 : 1) || !parts.every((part) => identifier.test(part)) || !object(value) ||
-        Object.keys(value).some((field) => !["enabled", "intervalMs"].includes(field)) ||
-        (value.enabled !== undefined && typeof value.enabled !== "boolean") ||
-        (value.intervalMs !== undefined && !timer(value.intervalMs))) return "invalid-overrides"
+  const providers = options.providers
+  if (providers === undefined) return
+  if (!object(providers) || Object.keys(providers).length > 128) return "invalid-overrides"
+  for (const [providerID, value] of Object.entries(providers)) {
+    if (!identifier.test(providerID) || !object(value) || Object.keys(value).some((field) => !["enabled", "intervalMs", "models"].includes(field)) ||
+      (value.enabled !== undefined && typeof value.enabled !== "boolean") ||
+      (value.intervalMs !== undefined && !timer(value.intervalMs))) return "invalid-overrides"
+    if (value.models === undefined) continue
+    if (!object(value.models) || Object.keys(value.models).length > 128) return "invalid-overrides"
+    for (const [modelID, model] of Object.entries(value.models)) {
+      if (!identifier.test(modelID) || !object(model) || Object.keys(model).some((field) => !["enabled", "intervalMs"].includes(field)) ||
+        (model.enabled !== undefined && typeof model.enabled !== "boolean") ||
+        (model.intervalMs !== undefined && !timer(model.intervalMs))) return "invalid-overrides"
     }
   }
 }
@@ -49,8 +53,7 @@ export function settings(options: Record<string, unknown> = {}): Settings | unde
 export function resolvePolicy(config: Settings, providerID: string, modelID: string,
   automatic: Pick<CacheProfile, "intervalMs" | "ttlMs" | "ttlEvidence">): CacheProfile {
   const provider = Object.hasOwn(config.providers ?? {}, providerID) ? config.providers![providerID] : undefined
-  const key = `${providerID}/${modelID}`
-  const model = Object.hasOwn(config.models ?? {}, key) ? config.models![key] : undefined
+  const model = provider?.models && Object.hasOwn(provider.models, modelID) ? provider.models[modelID] : undefined
   const intervalMs = model?.intervalMs ?? provider?.intervalMs ?? config.intervalMs ?? automatic.intervalMs
   const intervalSource = model?.intervalMs !== undefined ? "model" : provider?.intervalMs !== undefined ? "provider" :
     config.intervalMs !== undefined ? "global" : "automatic"
