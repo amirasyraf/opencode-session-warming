@@ -28,6 +28,38 @@ function harness(fetcher: typeof fetch = (async () => completedResponse()) as ty
   return { engine, clock, captures, requests, logs, statuses, start }
 }
 
+test("long ordinary generation is overdue refresh, not a late wall-clock timer", async () => {
+  const h = harness(undefined, { durationMs: 60000 })
+  const done = h.start()
+  await h.clock.advance(10000)
+  done(true)
+  await h.clock.advance(0)
+  assert.equal(h.requests.length, 1)
+  assert.equal(h.engine.has("parent"), true)
+  assert.equal(h.logs.some((log) => log.reason === "clock-gap"), false)
+  h.engine.dispose()
+})
+
+test("modern model defaults and failed retries have independent deadlines", async () => {
+  let calls = 0
+  const h = harness((async () => ++calls === 1 ? new Response(null, { status: 500 }) : completedResponse()) as typeof fetch,
+    { intervalMs: undefined, durationMs: 3600000 })
+  const token = h.engine.prepare("parent", true, { providerID: "openai", modelID: "gpt-5.6-sol" })!
+  const [url, init] = ordinary()
+  init.body = JSON.stringify({ ...JSON.parse(init.body as string), model: "gpt-5.6-sol" })
+  finish(h.captures.get(token)!(url, init)!, true)
+  assert.equal(h.statuses.at(-1)?.intervalMs, 1680000)
+  assert.equal(h.statuses.at(-1)?.ttlEvidence, "upstream-assumed")
+  await h.clock.advance(1680000)
+  assert.equal(h.requests.length, 1)
+  await h.clock.advance(29999)
+  assert.equal(h.requests.length, 1)
+  await h.clock.advance(1)
+  assert.equal(h.requests.length, 2)
+  assert.equal(h.statuses.at(-1)?.nextAttemptAt, 3390000)
+  h.engine.dispose()
+})
+
 function finish(observation: Observation, ok: boolean) {
   const callback = observation.complete
   observation.complete = undefined
@@ -35,7 +67,7 @@ function finish(observation: Observation, ok: boolean) {
 }
 
 test("options reject invalid, unknown, ineffective and unsafe timer values", () => {
-  assert.deepEqual(settings(), { enabled: true, intervalMs: 240000, durationMs: 3600000, debug: false })
+  assert.deepEqual(settings(), { enabled: true, durationMs: 3600000, debug: false })
   for (const options of [{ intervalMs: 0 }, { durationMs: Infinity }, { intervalMs: NaN },
     { durationMs: 2 ** 31 }, { intervalMs: 1.5 }, { intervalMs: 100, durationMs: 100 },
     { enabled: "yes" }, { debug: "yes" }, { interval: "4 minutes" }]) assert.equal(settings(options), undefined)
@@ -140,6 +172,69 @@ test("sleep-resume skips expired windows without catch-up requests", async () =>
   for (const [, timer] of h.clock.timers) timer.callback()
   assert.equal(h.requests.length, 0)
   assert.equal(h.engine.has("parent"), false)
+})
+
+test("sleep-resume invalidates a late active window without warming", async () => {
+  const h = harness(undefined, { durationMs: 10000 })
+  h.start()(true)
+  h.clock.time = 6000
+  const timers = [...h.clock.timers.values()]
+  h.clock.timers.clear()
+  for (const timer of timers) timer.callback()
+  assert.equal(h.requests.length, 0)
+  assert.equal(h.engine.has("parent"), false)
+  assert.equal(h.statuses.at(-1)?.reason, "clock-gap")
+  assert.equal(h.clock.timers.size, 0)
+})
+
+test("sleep-resume aborts an in-flight warm without scheduling a retry", async () => {
+  let signal: AbortSignal | undefined
+  const h = harness((async (_url, init) => {
+    signal = init!.signal!
+    return new Promise<Response>((_resolve, reject) => signal!.addEventListener("abort", () => reject(new Error("aborted")), { once: true }))
+  }) as typeof fetch, { durationMs: 60000 })
+  h.start()(true)
+  await h.clock.advance(100)
+  h.clock.time = 12000
+  const timers = [...h.clock.timers.values()]
+  h.clock.timers.clear()
+  for (const timer of timers) timer.callback()
+  await setImmediate()
+  assert.equal(signal?.aborted, true)
+  assert.equal(h.engine.has("parent"), false)
+  assert.equal(h.clock.timers.size, 0)
+  assert.equal(h.requests.length, 1)
+})
+
+test("queued warm results cannot replace an overdue watchdog before its callback runs", async () => {
+  for (const outcome of ["success", "http-failure", "network-failure", "body-completion"] as const) {
+    let settle: () => void = () => {}
+    const h = harness((async () => {
+      if (outcome === "body-completion") {
+        return new Response(new ReadableStream({ start(controller) {
+          settle = () => {
+            controller.enqueue(new TextEncoder().encode('data: {"type":"response.completed"}\n\n'))
+            controller.close()
+          }
+        } }), { headers: { "content-type": "text/event-stream" } })
+      }
+      return new Promise<Response>((resolve, reject) => {
+        settle = () => outcome === "network-failure" ? reject(new TypeError("fixture failure")) :
+          resolve(outcome === "http-failure" ? new Response(null, { status: 500 }) : completedResponse())
+      })
+    }) as typeof fetch, { durationMs: 60000 })
+    h.start()(true)
+    await h.clock.advance(100)
+    h.clock.time = 20000 // Resume, but queued network continuation runs before overdue timers.
+    settle()
+    await setImmediate()
+    assert.equal(h.engine.has("parent"), false, outcome)
+    assert.equal(h.statuses.at(-1)?.reason, "clock-gap", outcome)
+    assert.equal(h.logs.some((log) => log.event === "warm-completed"), false, outcome)
+    assert.equal(h.clock.timers.size, 0, outcome)
+    await h.clock.advance(30000)
+    assert.equal(h.requests.length, 1, outcome)
+  }
 })
 
 test("each root has independent timers and completed usage is observable", async () => {

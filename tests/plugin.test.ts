@@ -20,7 +20,7 @@ after(async () => {
 
 type Input = Parameters<NonNullable<Hooks["chat.params"]>>[0]
 const input = (sessionID = "root", agent = "build", providerID = "openai", messageID = "user") => ({
-  sessionID, agent, model: { providerID }, message: { id: messageID },
+  sessionID, agent, model: { providerID, api: { id: "gpt-test" } }, message: { id: messageID },
 }) as Input
 const params = { temperature: 1, topP: 1, topK: 1, maxOutputTokens: undefined, options: {} }
 
@@ -132,6 +132,20 @@ test("startup logs effective configuration and distinguishes unsupported provide
   await h.hooks.dispose!()
 })
 
+test("accepts every stable 1.18 patch and rejects adjacent or prerelease versions", async () => {
+  for (const version of ["1.18.0", "1.18.35"]) {
+    const h = await harness(async (id) => ({ id, version }))
+    assert.ok((await h.headers())[CAPTURE_HEADER], version)
+    await h.hooks.dispose!()
+  }
+  for (const version of ["1.17.99", "1.19.0", "1.18.36-beta.1", "1.18.01"]) {
+    const h = await harness(async (id) => ({ id, version }))
+    assert.deepEqual(await h.headers(), {}, version)
+    assert.ok(h.logs.some((log) => log.reason === "unsupported-session-version"), version)
+    await h.hooks.dispose!()
+  }
+})
+
 test("metadata lookup cannot indefinitely block the parent request", { timeout: 7000 }, async () => {
   const h = await harness(async () => new Promise(() => {}))
   await Promise.all([h.headers(), sleep(5100)]) // Keep the test event loop alive while production timers are unref'ed.
@@ -139,5 +153,21 @@ test("metadata lookup cannot indefinitely block the parent request", { timeout: 
   const out = { headers: {} }
   await h.hooks["chat.headers"]!(input(), out)
   assert.deepEqual(out.headers, {})
+  await h.hooks.dispose!()
+})
+
+test("Copilot target models are marked; switching to older/other models invalidates preparation", async () => {
+  const h = await harness()
+  for (const modelID of ["gpt-5.6-sol", "gpt-6.1-sol", "claude-sonnet-5", "claude-opus-5.5"]) {
+    const value = input("root", "build", "github-copilot")
+    value.model.api.id = modelID
+    assert.ok((await h.headers(value))[CAPTURE_HEADER], modelID)
+  }
+  for (const modelID of ["gpt-5.5", "claude-opus-4.8", "claude-haiku-5", "gemini-3.5"]) {
+    const value = input("root", "build", "github-copilot")
+    value.model.api.id = modelID
+    assert.deepEqual(await h.headers(value), {})
+  }
+  assert.ok(h.logs.some((entry) => entry.reason === "unsupported-model"))
   await h.hooks.dispose!()
 })

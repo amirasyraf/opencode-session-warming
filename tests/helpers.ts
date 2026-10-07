@@ -2,6 +2,8 @@ import { setImmediate } from "node:timers/promises"
 import type { Clock } from "../engine.ts"
 import { CODEX_ENDPOINT } from "../protocol.ts"
 
+export const imageURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII="
+
 export const requestBody = {
   model: "gpt-test",
   instructions: "Stable system instructions",

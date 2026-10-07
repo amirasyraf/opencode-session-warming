@@ -1,12 +1,12 @@
 # OpenCode session warming
 
-A local plugin for **OpenCode v1.18.30** that makes best-effort cache-warming
-requests for your root OpenAI/Codex OAuth sessions. It works while you're idle
+A local plugin for **OpenCode v1.18.x** that makes best-effort cache-warming
+requests for your root OpenAI and GitHub Copilot sessions. It works while you're idle
 and while the parent session is blocked waiting for foreground subagents or
 long-running tools.
 
-The same project also includes a small TUI status row with a segmented,
-blue-to-red warming indicator. The engine and UI use separate entry files because
+The same project also includes a sidebar status section with a continuous,
+colour-segmented warming indicator and a compact fallback. The engine and UI use separate entry files because
 OpenCode v1 loads server and TUI plugins separately.
 
 Warming runs inside the OpenCode process. OpenCode must remain running, and your
@@ -15,18 +15,29 @@ costs. Cache retention and savings are not guaranteed.
 
 ## Supported setup
 
-- OpenCode **1.18.30 stable release**.
-- The built-in `openai` provider using ChatGPT/Codex OAuth.
-- HTTP streaming requests to `https://chatgpt.com/backend-api/codex/responses`.
-- Self-contained text conversation input and ordinary function-tool definitions.
+- OpenCode **1.18.x stable releases**. Patch versions within the 1.18 minor
+  release are supported; pre-release builds and other minor versions are not.
+- The built-in `openai` provider using ChatGPT/Codex OAuth HTTP Responses,
+  including existing supported older Codex models.
+- OpenAI API-key GPT-5.6+ HTTP Responses at `https://api.openai.com/v1/responses`.
+- GitHub Copilot GPT-5.6+ HTTP Responses at `https://api.githubcopilot.com/responses`.
+- GitHub Copilot Claude Sonnet/Opus 5+ Anthropic Messages at
+  `https://api.githubcopilot.com/v1/messages`, with adaptive/disabled thinking.
+- Self-contained text and embedded-image conversation input, including image
+  function results, and ordinary function-tool definitions.
 - Root sessions only. Child/subagent requests do not reset their parent's timer.
 
-Other providers, public OpenAI API requests, WebSockets, native LLM execution,
+Other providers, Copilot enterprise/custom endpoints, Chat Completions, WebSockets, native LLM execution,
 provider-managed conversations, server-side background jobs, hosted tools, and
-media inputs are skipped. The plugin never changes your transport or credentials.
+audio, file inputs, and remotely referenced images are skipped. Embedded PNG,
+JPEG, WebP, and GIF images use base64 data URLs and are retained unchanged in RAM.
+The plugin never changes your ordinary transport or credentials. Model versions
+are compared numerically using the actual API model ID, not display aliases.
+Newer model names qualify only when their requests match the implemented protocol
+contract; new input features and hosted tools remain unsupported.
 Explicit native/WebSocket flags disable it. Pre-release builds are unsupported;
 some enable WebSockets implicitly. A conservative session-version check also
-skips sessions whose recorded version is not `1.18.30`; this is not a substitute
+skips sessions whose recorded version is not in `1.18.x`; this is not a substitute
 for checking your installed binary with `opencode --version`.
 
 ## Install
@@ -39,7 +50,7 @@ From the checkout directory, print a ready-to-paste entry containing the **actua
 file URL** (do not use a placeholder path):
 
 ```sh
-node --input-type=module -e 'import {existsSync} from "node:fs"; import {resolve} from "node:path"; import {pathToFileURL} from "node:url"; const path=resolve("plugin.ts"); if(!existsSync(path)) throw new Error("Run this from the plugin checkout"); console.log(JSON.stringify([pathToFileURL(path).href,{enabled:true,intervalMs:240000,durationMs:3600000}],null,2))'
+node --input-type=module -e 'import {existsSync} from "node:fs"; import {resolve} from "node:path"; import {pathToFileURL} from "node:url"; const path=resolve("plugin.ts"); if(!existsSync(path)) throw new Error("Run this from the plugin checkout"); console.log(JSON.stringify([pathToFileURL(path).href,{enabled:true,durationMs:3600000}],null,2))'
 ```
 
 Paste that entry into the existing `plugin` array in
@@ -64,33 +75,61 @@ Both entries belong to this repository. Preserve your existing TUI settings and
 quit/restart OpenCode after configuring it. OpenCode supplies the UI runtime;
 the OpenTUI development packages are for type checking, not a build step.
 
-The status row appears below the active route, so it remains visible with the
-sidebar hidden. A child session shows its root parent's warming status. The bar
-uses native TUI boxes with two-column segments, coloured backgrounds and gaps,
-rather than outlined square characters. It is a terminal-grid widget, not a
-pixel image with a rounded outline.
+The Warming section appears directly after LSP and before Todos/modified files in
+the sidebar. It scrolls with the other sections. When the sidebar is hidden, a
+compact indicator appears on the right of the agent/model row inside the prompt.
+Child sessions show their root parent's status; child and permission/question
+views without a prompt use a compact fallback with one blank row below it. Only
+one indicator is displayed at a time. The UI never changes sidebar visibility.
+
+The bar uses native TUI backgrounds with no gaps or visible glyphs. Its overall
+width follows available space, independently of the warming interval. It is a
+terminal-grid widget, not a pixel image with rounded corners. The sidebar
+section uses separate aligned label/value rows; this schematic represents the
+bar's placement, not literal rendered characters:
 
 ```text
-Warming [✓ ✓ ✓ ▸               ] 4 req · sending… · 44:00 left
+Warming                    Waiting
+
+[continuous coloured track       ]
+
+Next request                 03:42
+Window left                  44:00
+Requests Sent                    4
 ```
 
-- Background fill shows elapsed time in the warming window; unfilled segments
-  are muted. A `✓` marks a completed response, `▸`/`▹` a request in flight,
-  `×` a failure, and `–` an abort. Fill by itself never means a request was sent.
+- The bar is fill-only, with no ticks, dots, or other symbols. Background fill
+  shows elapsed time in the warming window; the unfilled track is muted.
+  Fill by itself never means a request was sent. Adjacent text shows request
+  counts, failures, sending state, and stop reasons.
 - Colours run cool on the left to red on the right. Set `"color": false` for
-  monochrome; `NO_COLOR` also disables the gradient. The symbols still identify
-  outcomes without colour.
-- The count is **requests attempted in the current window**, not cache hits.
-  New ordinary activity resets it. Remaining time uses the engine's actual
-  deadline. No completed-request marker is drawn just because time elapsed.
-  Progress freezes when warming is stopped.
-- Segment count is calculated as `ceil(duration / interval)`. Your four-minute /
-  one-hour configuration gives fifteen time segments and up to fourteen warming
-  requests (nothing starts at the 60-minute expiry). A shorter last interval gets
-  a proportionally shorter time span. Long model responses and retries can skip
-  or delay requests. High-frequency or narrow displays group time segments only
-  when necessary to fit the terminal while preserving request counts.
-- The row shows model activity, next request, sending, expiry, and stop reasons.
+  monochrome; `NO_COLOR` also disables the gradient. Status text remains readable
+  without colour.
+- **Requests Sent** counts warming responses that passed completion checks in the
+  current window. **Failed** appears separately when nonzero. Started, in-flight,
+  and aborted requests do not count as completed. The compact layout uses `sent`
+  for completed responses. These totals do not establish cache hits or savings.
+  New ordinary activity resets the counts. Remaining time uses the engine's actual
+  deadline. Elapsed fill does not imply a completed request.
+  Progress freezes and dims when warming is stopped; expiry is also muted.
+- The track has `ceil(duration / interval)` adjoining colour bands, with no gaps.
+  Its overall width stays the same regardless of band count; more bands are
+  narrower. Each band represents a nominal interval/request opportunity, not a
+  guaranteed actual request. A one-hour/four-minute window has 15 bands and up to
+  14 warming requests, since nothing starts at expiry. Response time, generation,
+  and retries can delay requests. A shorter final interval gets proportionally
+  less space where the terminal grid permits it. Dense windows group adjacent
+  intervals when there are more bands than available columns or `maxSegments`.
+- Each band has a distinct, constant colour along the cool-to-red palette.
+  Upcoming bands retain muted colours; elapsed portions become brighter. Subtle
+  alternating intensity separates bands even in monochrome. Fill advances with
+  fractional background shading on the leading cell. Very early progress may be subtle,
+  especially on limited-colour terminals. No decorative animation or blinking is used.
+- Timers use `mm:ss`, or `h:mm:ss` at an hour or more (`4:59:07`, not `299:07`).
+  The compact layout reserves timer space across hour/minute boundaries. It
+  prioritizes state and failures, then completed responses, remaining time, and next time;
+  optional fields and the bar are omitted when they do not fit beside the model.
+- The UI shows model activity, next request, sending, expiry, and stop reasons.
   It refreshes twice per second; extremely brief sending states may finish between
   refreshes. The last 128 attempt markers are retained; totals are not truncated.
 
@@ -100,7 +139,7 @@ UI options:
 | --- | --- | --- |
 | `enabled` | `true` | Show the indicator. |
 | `color` | `true` | Use the cool-to-red gradient; `false` uses theme monochrome. |
-| `maxSegments` | automatic | Optional positive integer display cap; otherwise derived from duration/interval and terminal width. |
+| `maxSegments` | automatic | Optional positive integer cap on visible colour bands; excess intervals are grouped. The track width is unchanged (compact bars cap at 16 columns). |
 | `showNextTimer` | `true` | Show the countdown to the next scheduled request. |
 | `showRemainingTimer` | `true` | Show the remaining warming-window duration. |
 
@@ -127,14 +166,62 @@ status rather than inventing progress.
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `true` | Enable the installed plugin. |
-| `intervalMs` | `240000` (4 minutes) | Initial idle delay and minimum delay between completed warm attempts. |
+| `intervalMs` | automatic | Optional global refresh interval; omit to select the provider/model/request profile below. |
 | `durationMs` | `3600000` (1 hour) | Maximum warming window after the latest ordinary root-model request starts. |
 | `debug` | `false` | Include routine scheduling, attempt-start, and ordinary-usage events at debug level. |
+| `providers` | none | Exact provider-ID overrides for `intervalMs` and `enabled`. |
+| `models` | none | Exact `providerID/api-model-ID` overrides for `intervalMs` and `enabled`. |
 
-The one-hour default covers long subagent waits. Both time settings must be
+The one-hour default covers long subagent waits. Supplied time settings must be
 positive safe integers, at most `2147483647` milliseconds, with `intervalMs`
-strictly less than `durationMs`. Unknown settings or invalid values disable
+strictly less than `durationMs` at global scope. An automatic or per-provider/model
+interval longer than the activity window schedules no request before expiry.
+Unknown settings or invalid values disable
 warming and emit a diagnostic. Milliseconds keep configuration dependency-free.
+
+### Automatic cache profiles
+
+| Transport/model | Retention used for scheduling | Refresh interval |
+| --- | --- | --- |
+| OpenAI API GPT-5.6+ | Documented 30-minute minimum | **28 minutes** |
+| Codex OAuth or Copilot GPT-5.6+ | Assumed upstream 30-minute minimum | **28 minutes** |
+| Copilot Sonnet/Opus 5+, default or mixed TTLs | Upstream/default or requested 5 minutes | **4 minutes** |
+| Copilot Sonnet/Opus 5+, exclusively `1h` cache markers | Requested 1 hour | **58 minutes** |
+| Older supported Codex models | Retention unknown | **4 minutes** |
+
+[OpenAI documents](https://developers.openai.com/api/docs/guides/prompt-caching)
+a 30-minute minimum after cache writes/reuse for GPT-5.6+.
+[Claude documents](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)
+5-minute/default and 1-hour cache markers. Gateway profiles assume the underlying
+provider's behavior; Codex/Copilot retention and real cache benefit have not been
+verified by live tests. The shortest captured Claude marker controls mixed-TTL
+scheduling. Retention metadata is not a measured cache-expiry countdown.
+
+Overrides are resolved independently for each setting: **model → provider →
+explicit global → automatic**. An explicit existing `intervalMs: 240000` retains
+its four-minute cadence; remove it to use automatic defaults. Models use actual
+API IDs, including any version suffix; no wildcard matching is performed.
+The global `enabled: false` always disables the plugin. A model can re-enable
+warming disabled by its provider override. At most 128 entries per override map
+are accepted. Intervals at or above the profile TTL emit `policy-warning` rather
+than silently clamping the configured value. Overrides never change provider TTLs.
+
+```jsonc
+{
+  "durationMs": 3600000,
+  "providers": {
+    "github-copilot": { "intervalMs": 1680000 }
+  },
+  "models": {
+    "github-copilot/claude-sonnet-5": { "intervalMs": 240000 },
+    "github-copilot/claude-opus-5": { "enabled": false }
+  }
+}
+```
+
+The sidebar shows provider/model and a documented, assumed, or requested TTL.
+The next-request timer and bar use the effective interval; the window timer
+continues to use the fixed ordinary-activity deadline.
 
 Example settings: warm every three minutes for up to 45 minutes:
 
@@ -151,10 +238,18 @@ For each recently active root session:
    provider or request is unsupported.
 2. A supported HTTP attempt starts the idle interval and fixed active window.
 3. The plugin waits for that HTTP response body to finish. If the interval has
-   already elapsed, the first warming attempt is immediately eligible.
-4. After each warm attempt finishes, it waits another interval.
+   already elapsed, the first warming attempt is immediately eligible. A timer
+   that wakes substantially late is treated as a sleep/resume or clock-gap
+   event; the stale warming window is stopped before any request is sent.
+4. After successful warming, the next target is the request start plus its
+   effective refresh interval, with at least the smaller of one second or one
+   interval after completion. Failed attempts retry after the smaller of 30 seconds
+   or one interval, increased by `Retry-After` when supplied. Retries never extend
+   the activity window or establish a cache refresh. A normally long response
+   crossing its refresh target is distinct from a timer waking late after sleep.
 5. Warming never extends the window. At expiry it aborts locally and releases its
-   state. Resume after sleep never sends catch-up bursts.
+   state. Resume after sleep never sends catch-up bursts or retries from the old
+   snapshot; a new ordinary root-model request is required to start warming again.
 
 The parent's raw HTTP response can end while OpenCode still waits for a task.
 That is why the plugin can warm a busy parent without entering its message queue.
@@ -164,10 +259,33 @@ Multiple active root sessions each have their own timers and usage.
 ## What is replayed
 
 The plugin captures the latest completed outgoing request **after** OpenCode's
-OAuth authentication and routing. Replays retain its instructions, conversation
+authentication and routing. Replays retain its instructions, conversation
 prefix, model, reasoning configuration, function-tool schemas, and cache keys.
-They append a transient instruction to do no work and reply `OK`, disable tool
-selection, and set `store: false`.
+Adapters select the replay strategy:
+
+- **OpenAI API GPT-5.6+:** unchanged input, native
+  `prompt_cache_options.prewarm: true`, non-streaming, and `store: false`. No output
+  is requested. Existing cache policy and breakpoints are preserved. Explicit-only
+  caching without a recognized breakpoint is skipped.
+- **Codex OAuth:** the existing transient `OK` instruction, disabled tool selection,
+  and `store: false`. Native prewarm and output caps are not inferred from the
+  public API contract. Appending the instruction can move implicit cache-write
+  boundaries; completed requests do not prove refresh of the original boundary.
+- **Copilot GPT:** unchanged input with an output ceiling of 128 tokens (or a
+  smaller captured ceiling), retained tool definitions, disabled tool selection,
+  and `store: false`.
+- **Copilot Claude:** unchanged messages/system/tools/cache markers, original tool
+  selection, thinking, effort and signed reasoning blocks; output is capped at
+  128 tokens or the smaller captured limit. Changing Claude tool selection can
+  invalidate message caching, so generated local function calls are discarded
+  without execution. Explicit thinking budgets incompatible with the small ceiling
+  are skipped instead of being changed. Native zero-output gateway prewarm is
+  not enabled without an endpoint-specific contract.
+
+Copilot replays retain captured authentication, version, intent, interaction, and
+image headers, and mark their initiation as `agent`. Output-limit fields follow
+the upstream protocol; real gateway acceptance is unverified. A rejection stops
+that snapshot; the plugin never escalates to a larger or unbounded budget.
 
 Warming calls go directly to the provider. Their responses are discarded, without
 adding chat messages, executing local tools, or emitting normal completion
@@ -183,24 +301,38 @@ removed. All instance-owned registrations, timers, and snapshots are released.
 Only recognized requests qualify. Stateful references, provider-hosted tools,
 unimplemented input types, and JSON bodies over 16 MiB are skipped. The plugin
 does not consume arbitrary request-body streams to classify them.
+Screenshots in user messages or function results do not disable warming when
+their image bytes are embedded in the request. They remain in the replay prefix,
+including on later text-only turns; the plugin never drops or rewrites them.
 
 ## Limits and failures
 
 - **OAuth expiry:** replays use captured authorization in RAM. They do not refresh
   OAuth. A `401`/`403` stops that session until a new ordinary request supplies a
   fresh capture. The configured duration is a maximum, not a guarantee.
-- **No hard output-token cap:** Codex does not have a verified output-cap field
+- **Codex has no hard output-token cap:** Codex does not have a verified output-cap field
   for this path. The `OK` instruction and 30-second local timeout are not billing
   ceilings, and aborting does not guarantee instantaneous remote cancellation.
 - **Request failures:** `400`/`422` stop an incompatible snapshot. `429` respects
-  `Retry-After` and the active window. Other failures wait at least one interval.
+  `Retry-After` and the active window. Other failures use the separate bounded
+  retry delay described above.
 - **Response failures:** incomplete/error SSE streams, invalid warm JSON, and
-  oversized responses count as failures. Successful JSON or empty HTTP 200
-  responses are accepted. Metadata parsing is bounded to 1 MiB per SSE frame and
+  oversized responses count as failures. The legacy Codex parser accepts valid
+  JSON or empty HTTP 200 responses; new adapters require a recognized terminal
+  Responses or Messages result. A bounded replay reaching its output ceiling is
+  accepted only with the explicit protocol terminal reason and recorded as
+  `outputLimitReached`; arbitrary incomplete responses still fail. SSE is also recognized from its field prefixes when
+  the HTTP media type is missing or misleading; completion and failure checks
+  still apply. Metadata parsing is bounded to 1 MiB per SSE frame and
   8 MiB per response.
 - **Session changes:** cancellation/errors, deletion, compaction, revert changes,
   disposal, and new ordinary model activity invalidate the snapshot. Title and
   summary generation do not replace it.
+- **Sleep/resume:** substantially late timers are treated as a clock gap. The
+  plugin stops warming and discards the snapshot rather than spending tokens on
+  a potentially expired cache; ordinary model activity must provide a fresh
+  snapshot before warming resumes. Queued warm network/body completions check the
+  scheduled watchdog wake too, so they cannot replace an overdue timer with a retry.
 - **Transport completion:** HTTP success and EOF are not proof of semantic model
   success. OpenCode session-error events invalidate captures when reported.
 
@@ -215,6 +347,10 @@ To disable, set `enabled: false` or remove the entry, then restart OpenCode.
 
 ## Troubleshooting
 
+This checkout's `opencode.json` allows external-directory access to the local
+OpenCode config, log, and state directories for troubleshooting from this project.
+Quit and restart OpenCode to load these permissions.
+
 Every normal log message starts with **`[session-warming]`**. On this installation,
 OpenCode writes to `~/.local/share/opencode/log/opencode.log` (or the corresponding
 XDG data directory). Search for the prefix, not only the logger's service name.
@@ -223,14 +359,26 @@ XDG data directory). Search for the prefix, not only the logger's service name.
 rg '\[session-warming\]' ~/.local/share/opencode/log/opencode.log
 ```
 
-- **`ready`** confirms initialization and records effective interval, duration,
-  request timeout, and metadata timeout. No `ready` or `disabled` event means you
+- **`ready`** confirms initialization and records automatic/global interval selection,
+  duration, request timeout, and metadata timeout. The effective per-request interval
+  is recorded by `captured`. No `ready` or `disabled` event means you
   should check the configured file URL and OpenCode's plugin-loader errors first.
 - **`captured`** confirms a replayable ordinary request and records its next warm
-  time and expiry. **`skipped`** identifies the specific unsupported provider,
+  time and expiry, adapter/strategy, effective interval/source and TTL evidence.
+  **`skipped`** identifies the specific unsupported provider/model,
   session version, endpoint, tools, input, or stateful request shape.
+  `unsupported-input-image` identifies an external/file-ID image reference,
+  malformed data URL, or unsupported image shape; `unsupported-input-file` and
+  `unsupported-input-audio` identify other unsupported media. The 16 MiB request
+  limit includes embedded images and reports `request-too-large`.
+  `unsupported-thinking-budget`, `unsupported-cache-control`, `cache-disabled`,
+  `unsupported-request-field`, and `model-mismatch` distinguish unsupported
+  contracts without exposing their content.
 - **`warm-completed`** includes attempt ID, model, HTTP status, provider request
   ID when supplied, elapsed time, token usage, and next attempt time.
+  Cache reads and writes are separate when available, including Claude's per-TTL
+  writes. Claude total input includes uncached, cache-read and cache-write tokens
+  only when all three are reported. Missing values remain unknown.
 - **`warm-failed`** is a warning with correlation ID, status, retry eligibility,
   next attempt time where applicable, and a safe error category/code. Network
   errors, invalid SSE JSON, truncated/incomplete streams, and size limits are
@@ -257,7 +405,7 @@ the terminal or loops recursively if fallback writing fails.
 ## Development and verification
 
 Use Node >=22.18; `mise.toml` pins the development version. OpenCode runtime
-typings are pinned to 1.18.30 and imported only as types. No Bun CLI is required.
+typings use the `1.18.x` range and are imported only as types. No Bun CLI is required.
 
 ```sh
 mise install
@@ -269,17 +417,33 @@ npm run test:tui
 
 `check` runs TypeScript static checks and Node tests with mock transports and
 fake clocks. The separate runtime test requires the installed `opencode`
-**1.18.30** binary. It creates isolated HOME/XDG directories, synthetic OAuth
+**1.18.x** binary. It creates isolated HOME/XDG directories, synthetic OAuth
 credentials, and a local mock provider; it never uses your accounts. It proves
-parent warming during a foreground child, absence of history/tool/notification
+parent warming with an attached screenshot during a foreground child and after
+tool continuation, preservation of the image-bearing prefix, absence of history/tool/notification
 side effects, normal continuation, and cancellation cleanup. Temporary processes
 and files are cleaned up afterward.
 
+The additional provider runtime fixture exercises OpenAI API native prewarm and
+Copilot GPT/Sonnet/Opus through OpenCode's real auth/routing and attachment
+serialization, foreground-child waits, tool continuation, cancellation and status
+publication. Claude warming returns mock tool calls to prove they are never
+executed. All provider hosts are mapped to a local mock; external network is
+blocked. Mock acceptance proves local integration, not live gateway support or
+cache savings.
+
+`adapters.ts` contains the small explicit provider registry; `protocol.ts` owns
+bounded Responses/Messages validation and parsing; `cache-policy.ts` owns model
+floors, settings and precedence. The engine owns scheduling and invalidation,
+independently of provider request formats. Add future providers by registering
+verified endpoint/request/replay contracts and fixtures, not by accepting every
+OpenAI-compatible endpoint. Existing ordinary fetch wrappers are preserved.
+
 `test:tui` additionally requires Python 3 on macOS/Linux. It starts an isolated
 local v1 server and attaches a disposable TUI in a pseudo-terminal, checks the
-session prompt and working keyboard input, and checks completed/sending/failed
-markers using synthetic status records without submitting a model request. It
-uses isolated HOME/XDG directories and does not touch running sessions.
+session prompt and working keyboard input, and checks request counts, sending
+  state, continuous background fill, sidebar placement, compact fallback and failures using synthetic status records without submitting a model
+request. It uses isolated HOME/XDG directories and does not touch running sessions.
 
 No automated test contacts a live model provider. To establish actual benefit,
 perform an explicitly enabled, limited control-versus-warmed experiment on your

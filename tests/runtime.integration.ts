@@ -10,14 +10,16 @@ import { spawn, spawnSync } from "node:child_process"
 import { setTimeout as sleep } from "node:timers/promises"
 import { CAPTURE_HEADER, KEEPALIVE } from "../protocol.ts"
 import { readStatus } from "../status.ts"
+import { imageURL } from "./helpers.ts"
+import { isSupportedOpenCodeVersion } from "../compatibility.ts"
 
 const project = resolve(fileURLToPath(new URL("..", import.meta.url)))
 const encoder = (type: string, fields: Record<string, unknown>) => `event: ${type}\ndata: ${JSON.stringify({ type, ...fields })}\n\n`
 
-function sendResponse(res: ServerResponse, output: unknown[], id: string, call = false) {
+function sendResponse(res: ServerResponse, output: unknown[], id: string, call = false, contentType = "text/event-stream") {
   const response = { id, object: "response", created_at: 1, status: "completed", model: "gpt-5.4", output,
     usage: { input_tokens: 100, input_tokens_details: { cached_tokens: 90 }, output_tokens: 1 } }
-  res.writeHead(200, { "content-type": "text/event-stream" })
+  res.writeHead(200, { "content-type": contentType })
   res.write(encoder("response.created", { response: { ...response, status: "in_progress", output: [] } }))
   const item = output[0] as Record<string, unknown>
   res.write(encoder("response.output_item.added", { output_index: 0, item: { ...item, arguments: call ? "" : undefined, content: call ? undefined : [] } }))
@@ -40,9 +42,9 @@ const message = (text: string, id: string) => [{ id, type: "message", role: "ass
 test("installed v1 warms blocked parents, preserves OAuth, and stops on cancellation", { timeout: 120000 }, async (t) => {
   const version = spawnSync("opencode", ["--version"], { encoding: "utf8" })
   assert.equal(version.status, 0, "opencode must be available")
-  assert.equal(version.stdout.trim(), "1.18.30", "runtime integration is version-pinned")
+  assert.equal(isSupportedOpenCodeVersion(version.stdout.trim()), true, "runtime integration requires OpenCode 1.18.x")
   const home = await mkdtemp(join(tmpdir(), "opencode-warming-test-"))
-  const requests: { session: string; warm: boolean; marker: boolean; auth: boolean; at: number }[] = []
+  const requests: { session: string; warm: boolean; marker: boolean; auth: boolean; at: number; input: unknown[] }[] = []
   const notifications: string[] = []
   const tools: string[] = []
   const parents = new Set<string>()
@@ -58,9 +60,9 @@ test("installed v1 warms blocked parents, preserves OAuth, and stops on cancella
       const body = JSON.parse(text)
       const session = String(req.headers["session-id"] ?? req.headers["x-session-id"])
       const warm = JSON.stringify(body.input.at(-1)).includes(KEEPALIVE)
-      requests.push({ session, warm, marker: CAPTURE_HEADER in req.headers, auth: req.headers.authorization === "Bearer integration-only", at: Date.now() })
+      requests.push({ session, warm, marker: CAPTURE_HEADER in req.headers, auth: req.headers.authorization === "Bearer integration-only", at: Date.now(), input: body.input })
       const id = `resp_${requests.length}`
-      if (warm) { sendResponse(res, message("OK", `msg_${id}`), id); return }
+      if (warm) { sendResponse(res, message("OK", `msg_${id}`), id, false, "application/json"); return }
       const hasTask = body.tools?.some((tool: { name: string }) => tool.name === "task")
       if (parents.has(session) && hasTask && !delegated.has(session)) {
         delegated.add(session)
@@ -96,6 +98,8 @@ test("installed v1 warms blocked parents, preserves OAuth, and stops on cancella
       const original = globalThis.fetch;
       globalThis.fetch = async (input, init) => {
         const url = new URL(input instanceof Request ? input.url : String(input));
+        // The AI SDK reads embedded images through fetch; data URLs use no network.
+        if (url.protocol === "data:") return original(input, init);
         if (url.href === "https://chatgpt.com/backend-api/codex/responses")
           return original("http://127.0.0.1:${backendPort}/responses", init);
         if (url.hostname === "127.0.0.1" || url.hostname === "localhost") return original(input, init);
@@ -143,16 +147,22 @@ test("installed v1 warms blocked parents, preserves OAuth, and stops on cancella
       }
       throw new Error(`Timed out waiting for ${description}: ${String(lastError)}\n${processLogs}`, { cause: lastError })
     }
-    await waitFor(async () => (await api("/global/health", undefined, 2000)).version === "1.18.30", "server health")
+    await waitFor(async () => isSupportedOpenCodeVersion((await api("/global/health", undefined, 2000)).version), "server health")
     const session = await api("/session", { title: "warming integration" })
     const id = String(session.id)
     parents.add(id)
     const prompt = api(`/session/${id}/message`, { model: { providerID: "openai", modelID: "gpt-5.4" },
-      parts: [{ type: "text", text: "integration-parent: delegate to slow-child and wait" }] })
+      parts: [{ type: "text", text: "integration-parent: delegate to slow-child and wait" },
+        { type: "file", mime: "image/png", filename: "screenshot.png", url: imageURL }] })
     await waitFor(() => requests.some((request) => request.session === id && request.warm), "parent warming during foreground task")
+    const ordinaryInput = requests.find((request) => request.session === id && !request.warm)!.input
+    assert.ok(ordinaryInput.some((item) => (item as { content?: { type: string; image_url?: string }[] }).content?.some(
+      (part) => part.type === "input_image" && part.image_url === imageURL)), "installed runtime must serialize the screenshot as embedded image input")
+    assert.deepEqual(requests.find((request) => request.session === id && request.warm)!.input.slice(0, -1), ordinaryInput)
     const statusPath = join(home, "state", "opencode", "session-warming", "status")
     await waitFor(async () => ((await readStatus(id, statusPath)).status?.attempted ?? 0) >= 1, "published warming progress")
     assert.equal((await readFile(join(statusPath, `${id}.json`), "utf8")).includes("integration-only"), false)
+    assert.equal((await readFile(join(statusPath, `${id}.json`), "utf8")).includes(imageURL), false)
     const status = await api("/session/status")
     assert.equal((status[id] as { type: string }).type, "busy")
     assert.equal(notifications.includes(id), false, "warming must not emit idle/task-completion events")
@@ -166,6 +176,14 @@ test("installed v1 warms blocked parents, preserves OAuth, and stops on cancella
     const childSessions = requests.filter((request) => request.session !== id)
     assert.ok(childSessions.length > 0)
     assert.ok(childSessions.every((request) => !request.warm))
+
+    await waitFor(() => requests.some((request) => request.session === id && request.warm &&
+      request.input.some((item) => (item as { type?: string }).type === "function_call_output")), "warming after tool continuation with the screenshot still in history")
+    const continued = requests.filter((request) => request.session === id && !request.warm).at(-1)!
+    const continuedWarm = requests.find((request) => request.session === id && request.warm &&
+      request.input.some((item) => (item as { type?: string }).type === "function_call_output"))!
+    assert.deepEqual(continuedWarm.input.slice(0, -1), continued.input)
+    assert.equal(JSON.stringify(await api(`/session/${id}/message`)).includes(KEEPALIVE), false)
 
     const cancelled = await api("/session", { title: "cancellation integration" })
     const cancelledID = String(cancelled.id)

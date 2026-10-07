@@ -64,7 +64,8 @@ export function abortableFetch(fetcher: typeof fetch, url: string, init: Request
 
 const fields = new Set(["event", "sessionID", "reason", "providerID", "model", "attemptID", "attempt", "requestID",
   "status", "elapsedMs", "nextAttemptAt", "expiresAt", "intervalMs", "durationMs", "timeoutMs", "metadataTimeoutMs",
-  "inputTokens", "cachedTokens", "outputTokens", "errorCategory", "errorCode", "retryable", "version", "dropped"])
+  "inputTokens", "cachedTokens", "outputTokens", "cacheWriteTokens", "cacheWrite5mTokens", "cacheWrite1hTokens", "outputLimitReached",
+  "adapterID", "strategy", "ttlMs", "ttlEvidence", "intervalSource", "errorCategory", "errorCode", "retryable", "version", "dropped"])
 
 function safeDiagnostic(value: Diagnostic): Diagnostic {
   const safe: Diagnostic = { event: "diagnostic" }
@@ -79,7 +80,7 @@ function safeDiagnostic(value: Diagnostic): Diagnostic {
 
 function levelFor(value: Diagnostic): Level {
   if (value.event === "internal-error" || (value.event === "disabled" && value.reason !== "configured-off" && value.reason !== "unsupported-transport")) return "error"
-  if (value.event === "warm-failed" || value.event === "capture-failed" || value.event === "ui-status-failed" ||
+  if (value.event === "warm-failed" || value.event === "capture-failed" || value.event === "ui-status-failed" || value.event === "policy-warning" ||
       (value.event === "warm-aborted" && value.reason === "request-timeout") ||
       (value.event === "skipped" && value.reason === "session-metadata-unavailable")) return "warn"
   if (["scheduled", "warm-started", "ordinary-usage"].includes(value.event) ||

@@ -8,9 +8,11 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 import { setTimeout as sleep } from "node:timers/promises"
 import { StatusPublisher } from "../status.ts"
 import type { WarmStatus } from "../status.ts"
+import { isSupportedOpenCodeVersion } from "../compatibility.ts"
 
-test("interactive v1 renders native progress, accepts input and updates request markers", { timeout: 120000 }, async (t) => {
-  assert.equal(spawnSync("opencode", ["--version"], { encoding: "utf8" }).stdout.trim(), "1.18.30")
+test("interactive v1 renders sidebar progress and responsive fallbacks without provider activity", { timeout: 180000 }, async (t) => {
+  assert.equal(isSupportedOpenCodeVersion(spawnSync("opencode", ["--version"], { encoding: "utf8" }).stdout.trim()), true,
+    "TUI smoke test requires OpenCode 1.18.x")
   assert.equal(spawnSync("python3", ["--version"]).status, 0, "Python 3 is required for the PTY smoke test")
   const project = resolve(fileURLToPath(new URL("..", import.meta.url)))
   const home = await mkdtemp(join(tmpdir(), "opencode-warming-tui-"))
@@ -61,7 +63,7 @@ test("interactive v1 renders native progress, accepts input and updates request 
       assert.ok(response.ok, `${path}: HTTP ${response.status}`)
       return response.json() as Promise<Record<string, unknown>>
     }
-    await waitFor(async () => !!url && (await api("/global/health")).version === "1.18.30", "server health")
+    await waitFor(async () => !!url && isSupportedOpenCodeVersion((await api("/global/health")).version), "server health")
     const session = await api("/session", { title: "Warming UI fixture" })
     const startedAt = Date.now() - 16 * 60000
     const status: WarmStatus = { sessionID: String(session.id), phase: "waiting", startedAt,
@@ -73,10 +75,15 @@ test("interactive v1 renders native progress, accepts input and updates request 
     const child = spawn("python3", [join(project, "tests", "tui_driver.py"), worktree, url!, status.sessionID], {
       signal: t.signal, env: { ...env, WARMING_TUI_EXPECT_INDICATOR: "1" }, stdio: ["ignore", "pipe", "pipe"],
     })
-    child.stdout.on("data", (chunk) => { output = (output + chunk).slice(-32000) })
+    child.stdout.on("data", (chunk) => { output = (output + chunk).slice(-262144) })
     child.stderr.on("data", (chunk) => { errors = (errors + chunk).slice(-16000) })
     const closed = new Promise<number | null>((done, reject) => { child.once("error", reject); child.once("close", done) })
-    await waitFor(async () => /\[session-warming\] ui-ready/.test(await readFile(logPath, "utf8")), "UI initialization")
+    await waitFor(async () => {
+      if (child.exitCode !== null) throw new Error(`TUI exited: ${child.exitCode}\n${output}\n${errors}`)
+      return /\[session-warming\] ui-ready/.test(await readFile(logPath, "utf8"))
+    }, "UI initialization").catch(async (error) => {
+      throw new Error(`${String(error)}\n${output}\n${errors}\n${await readFile(logPath, "utf8").catch(() => "")}`)
+    })
     await sleep(1500)
     status.phase = "sending"
     status.attempted = 4
@@ -86,6 +93,7 @@ test("interactive v1 renders native progress, accepts input and updates request 
     await sleep(2500)
     status.phase = "waiting"
     status.failed = 1
+    status.intervalMs = 480000
     status.marks.at(-1)!.result = "failed"
     status.nextAttemptAt = Date.now() + 30000
     publisher.publish(status)
@@ -96,9 +104,43 @@ test("interactive v1 renders native progress, accepts input and updates request 
     const result = JSON.parse(output)
     assert.equal(result.screenReady, true)
     assert.equal(result.inputResponsive, true)
-    assert.equal(result.indicatorCompleted, true, `Completed markers missing\n${result.output}`)
-    assert.equal(result.indicatorSending, true, `In-flight marker missing\n${result.output}`)
-    assert.equal(result.indicatorFailed, true, `Failed marker missing\n${result.output}`)
+    assert.equal(result.indicatorCompleted, true, `Actual completed count missing\n${result.output}`)
+    assert.equal(result.indicatorFillOnly, true, `Bar contains visible symbols\n${result.output}`)
+    assert.equal(result.indicatorSegmented, true, `15 adjoining interval bands missing\n${result.output}`)
+    assert.equal(result.segmentationChanged, true, `Changing interval did not regroup the fixed-width track\n${result.output}`)
+    assert.equal(result.indicatorSending, true, `Sending status missing\n${result.output}`)
+    assert.equal(result.indicatorFailed, true, `Failure count missing\n${result.output}`)
+    assert.equal(result.sidebarPlaced, true, `Sidebar indicator not below LSP\n${JSON.stringify(result.snapshots)}`)
+    assert.equal(result.compactPlaced, true, `Prompt-row fallback missing\n${JSON.stringify(result.snapshots)}`)
+    assert.equal(result.narrowPlaced, true, `Narrow prompt lost failures\n${JSON.stringify(result.snapshots)}`)
+    assert.equal(result.restoredSidebar, true, `Sidebar did not return after resize\n${result.output}`)
+    assert.equal(result.noDuplicates, true, `Duplicate indicators\n${result.output}`)
+    for (const mode of ["mono", "child"] as const) {
+      let id = status.sessionID
+      if (mode === "child") {
+        status.phase = "stopped"
+        status.reason = "http-401"
+        status.stoppedAt = Date.now()
+        publisher.publish(status)
+        await publisher.flush()
+        id = String((await api("/session", { title: "Child UI fixture", parentID: status.sessionID })).id)
+      }
+      let fixtureOutput = ""
+      let fixtureErrors = ""
+      const fixture = spawn("python3", [join(project, "tests", "tui_driver.py"), worktree, url!, id], {
+        signal: t.signal, env: { ...env, WARMING_TUI_EXPECT_INDICATOR: "1", WARMING_TUI_LAYOUT_ONLY: mode,
+          ...(mode === "mono" ? { NO_COLOR: "1" } : {}) }, stdio: ["ignore", "pipe", "pipe"],
+      })
+      fixture.stdout.on("data", (chunk) => { fixtureOutput += chunk })
+      fixture.stderr.on("data", (chunk) => { fixtureErrors += chunk })
+      const fixtureCode = await new Promise<number | null>((done, reject) => { fixture.once("error", reject); fixture.once("close", done) })
+      assert.equal(fixtureCode, 0, `${mode} fixture failed\n${fixtureOutput}\n${fixtureErrors}`)
+      const rendered = JSON.parse(fixtureOutput)
+      assert.equal(rendered[mode === "mono" ? "monochrome" : "childPlaced"], true, `${mode} layout failed\n${JSON.stringify(rendered.snapshots)}\n${rendered.output}`)
+      assert.equal(rendered.noDuplicates, true)
+    }
+    const finalLogs = await readFile(logPath, "utf8").catch(() => "")
+    assert.doesNotMatch(finalLogs, /warm-started|warm-completed|initialization-failed/)
     assert.doesNotMatch(logs, /warm-started|warm-completed|initialization-failed/)
     assert.doesNotMatch(result.output, /failed to load tui plugin|Cannot find module/)
   } catch (error) { failure = true; throw error }

@@ -5,6 +5,12 @@ import type { Diagnostic } from "./diagnostics.ts"
 import { CAPTURE_HEADER } from "./protocol.ts"
 import { transport } from "./transport.ts"
 import { StatusPublisher } from "./status.ts"
+import { isSupportedOpenCodeVersion, SUPPORTED_OPENCODE_VERSION_RANGE } from "./compatibility.ts"
+import { supportsModel } from "./adapters.ts"
+import type { ModelContext } from "./adapters.ts"
+
+const context = (input: { model: { providerID: string; api: { id: string } } }): ModelContext =>
+  ({ providerID: input.model.providerID, modelID: input.model.api.id })
 
 const hiddenAgents = new Set(["title", "summary"])
 const flag = (name: string) => ["true", "1"].includes(process.env[name] ?? "")
@@ -34,7 +40,8 @@ const plugin: Plugin = async ({ client }, options = {}) => {
   const publisher = new StatusPublisher(diagnostic)
   try { engine = new WarmingEngine(config, transport(), diagnostic, undefined, (status) => publisher.publish(status)) }
   catch (error) { diagnostic({ event: "internal-error", reason: "initialization-failed", ...errorDetails(error) }); return {} }
-  diagnostic({ event: "ready", version: "1.18.30", providerID: "openai", intervalMs: config.intervalMs,
+  diagnostic({ event: "ready", version: SUPPORTED_OPENCODE_VERSION_RANGE, intervalMs: config.intervalMs,
+    intervalSource: config.intervalMs === undefined ? "automatic" : "global",
     durationMs: config.durationMs, timeoutMs: 30000, metadataTimeoutMs: 5000 })
   let disposed = false
   const clear = (id: string, reason: string) => {
@@ -59,17 +66,17 @@ const plugin: Plugin = async ({ client }, options = {}) => {
         }
         if (result.data.parentID) { prepared.delete(input.sessionID); return }
         // Conservative guard for sessions created by unsupported/pre-release versions.
-        const supported = result.data.version === "1.18.30" && input.model.providerID === "openai" && input.agent !== "compaction"
+        const supported = isSupportedOpenCodeVersion(result.data.version) && supportsModel(context(input)) && input.agent !== "compaction"
         if (!supported) {
           prepared.delete(input.sessionID)
           diagnostic({ event: "skipped", sessionID: input.sessionID, providerID: input.model.providerID,
-            version: result.data.version, reason: result.data.version !== "1.18.30" ? "unsupported-session-version" :
-              input.agent === "compaction" ? "compaction" : "unsupported-provider" })
-          engine.inactive(input.sessionID, result.data.version !== "1.18.30" ? "unsupported-session-version" :
-            input.agent === "compaction" ? "compaction" : "unsupported-provider")
+            version: result.data.version, reason: !isSupportedOpenCodeVersion(result.data.version) ? "unsupported-session-version" :
+              input.agent === "compaction" ? "compaction" : input.model.providerID === "github-copilot" ? "unsupported-model" : "unsupported-provider" })
+          engine.inactive(input.sessionID, !isSupportedOpenCodeVersion(result.data.version) ? "unsupported-session-version" :
+            input.agent === "compaction" ? "compaction" : input.model.providerID === "github-copilot" ? "unsupported-model" : "unsupported-provider", context(input))
           return
         }
-        const token = engine.prepare(input.sessionID, true)
+        const token = engine.prepare(input.sessionID, true, context(input))
         if (token) {
           preparation.token = token
           reverts.set(input.sessionID, JSON.stringify(result.data.revert ?? null))
@@ -81,7 +88,7 @@ const plugin: Plugin = async ({ client }, options = {}) => {
       }
     },
     "chat.headers": async (input, output) => {
-      if (disposed || hiddenAgents.has(input.agent) || input.agent === "compaction" || input.model.providerID !== "openai") return
+      if (disposed || hiddenAgents.has(input.agent) || input.agent === "compaction" || !supportsModel(context(input))) return
       const request = prepared.get(input.sessionID)
       if (request?.messageID === input.message.id && request.token) output.headers[CAPTURE_HEADER] = request.token
     },

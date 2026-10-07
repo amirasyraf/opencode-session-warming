@@ -8,6 +8,13 @@ import type { Diagnostic } from "./diagnostics.ts"
 export type Phase = "preparing" | "generating" | "waiting" | "sending" | "stopped" | "expired"
 export type Mark = { at: number; result: "sending" | "completed" | "failed" | "aborted" }
 export type WarmStatus = {
+  providerID?: string
+  model?: string
+  adapterID?: string
+  strategy?: "keepalive" | "native-prewarm" | "bounded-replay"
+  ttlMs?: number
+  ttlEvidence?: "documented" | "upstream-assumed" | "requested"
+  intervalSource?: "automatic" | "global" | "provider" | "model"
   sessionID: string
   phase: Phase
   startedAt: number
@@ -48,6 +55,13 @@ function safeStatus(value: unknown): WarmStatus | undefined {
     marks.push({ at: mark.at, result: mark.result as Mark["result"] })
   }
   return {
+    providerID: ["openai", "github-copilot"].includes(String(value.providerID)) ? value.providerID as string : undefined,
+    model: typeof value.model === "string" && /^[A-Za-z0-9_.-]{1,160}$/.test(value.model) ? value.model : undefined,
+    adapterID: ["codex", "openai-api", "github-copilot"].includes(String(value.adapterID)) ? value.adapterID as string : undefined,
+    strategy: ["keepalive", "native-prewarm", "bounded-replay"].includes(String(value.strategy)) ? value.strategy as WarmStatus["strategy"] : undefined,
+    ttlMs: number(value.ttlMs) && value.ttlMs > 0 ? value.ttlMs : undefined,
+    ttlEvidence: ["documented", "upstream-assumed", "requested"].includes(String(value.ttlEvidence)) ? value.ttlEvidence as WarmStatus["ttlEvidence"] : undefined,
+    intervalSource: ["automatic", "global", "provider", "model"].includes(String(value.intervalSource)) ? value.intervalSource as WarmStatus["intervalSource"] : undefined,
     sessionID: value.sessionID, phase: value.phase as Phase, startedAt: value.startedAt as number,
     expiresAt: value.expiresAt as number, intervalMs: value.intervalMs as number, durationMs: value.durationMs as number,
     nextAttemptAt: value.nextAttemptAt as number | undefined, attempted: value.attempted as number,

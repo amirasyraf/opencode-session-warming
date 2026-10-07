@@ -3,17 +3,17 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Best-effort root-session Codex HTTP cache warming for OpenCode v1.18.30",
+  "description": "Provider-aware root-session HTTP cache warming for OpenCode v1.18.x",
   "engines": { "node": ">=22.18.0" },
   "scripts": {
     "test": "node --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm test",
-    "test:runtime": "node --test tests/runtime.integration.ts",
+    "test:runtime": "node --test tests/runtime.integration.ts tests/providers.integration.ts",
     "test:tui": "node --test tests/tui.integration.ts"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "1.18.30",
+    "@opencode-ai/plugin": "1.18.x",
     "@opentui/core": "0.4.5",
     "@opentui/keymap": "0.4.5",
     "@opentui/solid": "0.4.5",
