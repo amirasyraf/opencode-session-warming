@@ -205,26 +205,37 @@ The global `enabled: false` always disables the plugin. A model can re-enable
 warming disabled by its provider override. Intervals at or above the profile TTL emit `policy-warning` rather
 than silently clamping the configured value. Overrides never change provider TTLs.
 
+Fully explicit defaults for the currently targeted models look like this:
+
 ```jsonc
 {
+  "enabled": true,
   "durationMs": 3600000,
+  "debug": false,
   "providers": {
     "openai": {
+      "enabled": true,
       "models": {
-        "gpt-5.6-luna": {}
+        "gpt-5.6-luna": { "enabled": true, "intervalMs": 1680000 }
       }
     },
     "github-copilot": {
-      "intervalMs": 1680000,
+      "enabled": true,
       "models": {
-        "gpt-5.6-luna": {},
-        "claude-sonnet-5": { "intervalMs": 240000 },
-        "claude-opus-5": { "enabled": false }
+        "gpt-5.6-luna": { "enabled": true, "intervalMs": 1680000 },
+        "claude-sonnet-5": { "enabled": true, "intervalMs": 240000 },
+        "claude-opus-5": { "enabled": true, "intervalMs": 240000 }
       }
     }
   }
 }
 ```
+
+There is intentionally no global or provider `intervalMs`: GPT and Claude have
+different automatic defaults. Claude's 58-minute interval for an exclusively
+one-hour cache boundary is derived from captured `cache_control` markers and
+cannot be represented by one static model value. Unknown future model IDs still
+use the automatic profile when no exact override is present.
 
 The sidebar shows provider/model and a documented, assumed, or requested TTL.
 The next-request timer and bar use the effective interval; the window timer
