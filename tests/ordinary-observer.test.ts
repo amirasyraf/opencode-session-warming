@@ -8,6 +8,7 @@ import { Journal } from "../journal.ts"
 import { OrdinaryObserver } from "../ordinary-observer.ts"
 import { readSegment, segmentFiles } from "../journal-reader.ts"
 import type { EventRecord } from "../journal-schema.ts"
+import type { UsageStats } from "../status.ts"
 
 function message(id = "assistant", fields: Record<string, unknown> = {}): Event {
   return { type: "message.updated", properties: { info: { id, sessionID: "root", role: "assistant", parentID: "user",
@@ -20,10 +21,10 @@ function step(id = "step", messageID = "assistant", fields: Record<string, unkno
 }
 const call = { sessionID: "root", userMessageID: "user", providerID: "openai", modelID: "alias", apiModelID: "native-model", at: 20 }
 
-async function harness() {
+async function harness(onUsage?: (sessionID: string, usage: UsageStats) => void) {
   const directory = await mkdtemp(join(tmpdir(), "warming-observer-"))
   const journal = new Journal({ enabled: true, retentionDays: 365 }, () => {}, { directory })
-  const observer = new OrdinaryObserver(journal)
+  const observer = new OrdinaryObserver(journal, onUsage)
   return { journal, observer, async finish() {
     observer.dispose(); await journal.dispose()
     const data: EventRecord[] = []
@@ -37,7 +38,8 @@ async function harness() {
 }
 
 test("step accounting survives warming absence, deduplicates snapshots, and retains amended outcomes", async () => {
-  const h = await harness()
+  const live: UsageStats[] = []
+  const h = await harness((_sessionID, usage) => live.push(usage))
   h.observer.classify("root", true)
   h.observer.event(message())
   const id = h.observer.call(call, "1.18.35")
@@ -54,6 +56,7 @@ test("step accounting survives warming absence, deduplicates snapshots, and reta
   assert.equal(usage[0]!.uncachedInputTokens, 10); assert.equal(usage[0]!.cacheReadTokens, 90)
   assert.equal(usage[0]!.nonReasoningOutputTokens, 2); assert.equal(usage[0]!.reasoningTokens, 3)
   assert.equal(usage[0]!.costUnit, "unspecified")
+  assert.deepEqual(live, [{ uncachedInputTokens: 10, cachedTokens: 90, cacheWriteTokens: 5, outputTokens: 5 }])
   assert.equal(data.filter((entry) => entry.event === "ordinary.message-completed").length, 2)
   assert.equal(JSON.stringify(data).includes("secret"), false); assert.equal(JSON.stringify(data).includes("private"), false)
   assert.equal(data.some((entry) => entry.reportedCost === 999), false)

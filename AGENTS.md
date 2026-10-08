@@ -129,10 +129,11 @@ store, background daemon, task counter, or conversation reconstruction layer.
   shows state, request counts, failures, and timers. Preserve the cool-left /
   red-right palette, readable monochrome mode, frozen stopped progress, and both
   timers enabled by default.
-- The sidebar may show cumulative provider-reported warm input, output, cache
-  read/write, uncached input, and cache-read ratio values for the current window.
-  Omit missing fields, never turn missing usage into zero, and do not present the
-  ratio or token values as proof of cache refresh or as a dollar-cost estimate.
+- The sidebar may show cumulative provider-reported warm and admitted ordinary
+  root-step input, output, cache read/write, uncached input, and cache-read ratio
+  values for the current window. Omit missing fields, never turn normalized zero
+  into proof of upstream usage, and do not present the ratio or token values as
+  proof of cache refresh or as a dollar-cost estimate.
 - Prefer the sidebar section after LSP. Use the prompt-row fallback when the
   sidebar is hidden, and the bottom-padded fallback for child, permission, and
   question views without a prompt. Never display duplicate indicators.

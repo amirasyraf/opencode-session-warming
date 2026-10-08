@@ -9,7 +9,7 @@ import { isSupportedOpenCodeVersion, SUPPORTED_OPENCODE_VERSION_RANGE } from "./
 import { supportsModel } from "./adapters.ts"
 import type { ModelContext } from "./adapters.ts"
 import { Journal } from "./journal.ts"
-import { OrdinaryObserver } from "./ordinary-observer.ts"
+import { normalizedUsage, OrdinaryObserver } from "./ordinary-observer.ts"
 
 const context = (input: { model: { providerID: string; api: { id: string } } }): ModelContext =>
   ({ providerID: input.model.providerID, modelID: input.model.api.id })
@@ -45,10 +45,13 @@ const plugin: Plugin = async ({ client, project }, options = {}) => {
     return {}
   }
   if (config.journal?.enabled) journal = new Journal(config.journal, log, { projectID: project?.id })
-  const ordinary = journal ? new OrdinaryObserver(journal) : undefined
+  let ordinary: OrdinaryObserver | undefined
   let engine: WarmingEngine
   const publisher = new StatusPublisher(diagnostic)
-  try { engine = new WarmingEngine(config, transport(), diagnostic, undefined, (status) => publisher.publish(status)) }
+  try {
+    engine = new WarmingEngine(config, transport(), diagnostic, undefined, (status) => publisher.publish(status))
+    ordinary = journal ? new OrdinaryObserver(journal, (sessionID, usage) => engine.recordOrdinaryUsage(sessionID, usage)) : undefined
+  }
   catch (error) {
     diagnostic({ event: "internal-error", reason: "initialization-failed", ...errorDetails(error) })
     ordinary?.dispose(); await journal?.dispose(); return {}
@@ -116,6 +119,11 @@ const plugin: Plugin = async ({ client, project }, options = {}) => {
     event: async ({ event }) => {
       if (disposed) return
       try { ordinary?.event(event) } catch { if (journal) journal.counters.excludedMetadata++ }
+      if (!ordinary && event.type === "message.part.updated" && event.properties.part.type === "step-finish" && engine.has(event.properties.part.sessionID)) {
+        const part = event.properties.part
+        const usage = normalizedUsage(part.tokens)
+        if (usage) engine.recordOrdinaryUsage(part.sessionID, usage)
+      }
       if (event.type === "session.error" && event.properties.sessionID) clear(event.properties.sessionID, "session-error")
       if (event.type === "session.compacted") clear(event.properties.sessionID, "compacted")
       if (event.type === "session.deleted") {

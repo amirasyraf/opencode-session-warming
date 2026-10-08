@@ -10,7 +10,7 @@ const MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
 type ObjectValue = Record<string, unknown>
 export type Snapshot = { url: string; headers: Headers; body: ObjectValue }
-export type Usage = { inputTokens?: number; cachedTokens?: number; outputTokens?: number; cacheWriteTokens?: number;
+export type Usage = { inputTokens?: number; uncachedInputTokens?: number; cachedTokens?: number; outputTokens?: number; cacheWriteTokens?: number;
   cacheWrite5mTokens?: number; cacheWrite1hTokens?: number; outputLimitReached?: boolean }
 export type ResponseContract = { protocol?: "responses" | "messages"; strict?: boolean; outputLimited?: boolean }
 

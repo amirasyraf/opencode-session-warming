@@ -3,11 +3,23 @@ import type { Event } from "@opencode-ai/sdk"
 import { identifier, safeData } from "./journal-schema.ts"
 import type { JournalData } from "./journal-schema.ts"
 import type { Journal } from "./journal.ts"
+import type { UsageStats } from "./status.ts"
 
 type Call = { sessionID: string; userMessageID: string; providerID: string; modelID: string; apiModelID: string; at: number; ordinaryCallID: string }
 type Assistant = { sessionID: string; userMessageID: string; assistantMessageID: string; providerID: string; modelID: string;
   startedAt: number; completedAt?: number; excluded: boolean; admitted: boolean; finish?: string; errorCategory?: string }
 type Pending = { data: JournalData; at: number; bytes: number }
+type NormalizedTokens = { input: number; output: number; reasoning: number; cache: { read: number; write: number } }
+
+const positive = (value: number | undefined) => typeof value === "number" && value > 0 ? value : undefined
+export function normalizedUsage(tokens: NormalizedTokens): UsageStats | undefined {
+  const usage: UsageStats = {
+    uncachedInputTokens: positive(tokens.input), cachedTokens: positive(tokens.cache.read), cacheWriteTokens: positive(tokens.cache.write),
+  }
+  const output = tokens.output + tokens.reasoning
+  if (output > 0) usage.outputTokens = output
+  return Object.values(usage).some((value) => value !== undefined) ? usage : undefined
+}
 
 /** Observe live source metadata, never reconstruct or fetch conversation history. */
 export class OrdinaryObserver {
@@ -19,8 +31,10 @@ export class OrdinaryObserver {
   private pending = new Map<string, Pending>()
   private pendingBytes = 0
   private timer: ReturnType<typeof setInterval>
-  constructor(journal: Journal) {
+  private onUsage?: (sessionID: string, usage: UsageStats) => void
+  constructor(journal: Journal, onUsage?: (sessionID: string, usage: UsageStats) => void) {
     this.journal = journal
+    this.onUsage = onUsage
     this.timer = setInterval(() => this.expire(), 1000)
     this.timer.unref()
   }
@@ -61,7 +75,15 @@ export class OrdinaryObserver {
       ordinaryCallID: call?.ordinaryCallID, apiModelID: call?.apiModelID })!
     const key = `${data.event}:${data.assistantMessageID}:${data.partID ?? "outcome"}`
     const fingerprint = JSON.stringify(value)
-    if (this.seen.get(key) !== fingerprint) { this.put(this.seen, key, fingerprint); this.journal.record(value) }
+    const first = this.seen.get(key) === undefined
+    if (first || this.seen.get(key) !== fingerprint) {
+      this.put(this.seen, key, fingerprint); this.journal.record(value)
+      if (first && value.event === "ordinary.step-usage") {
+        const usage = normalizedUsage({ input: Number(value.uncachedInputTokens ?? 0), output: Number(value.nonReasoningOutputTokens ?? 0),
+          reasoning: Number(value.reasoningTokens ?? 0), cache: { read: Number(value.cacheReadTokens ?? 0), write: Number(value.cacheWriteTokens ?? 0) } })
+        if (usage) this.onUsage?.(String(value.sessionID), usage)
+      }
+    }
     return true
   }
 

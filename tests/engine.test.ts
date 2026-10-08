@@ -260,9 +260,17 @@ test("status accumulates provider usage and resets it for a new warming window",
   h.start()(true)
   await h.clock.advance(100)
   await h.clock.advance(100)
-  assert.deepEqual(h.statuses.at(-1)?.usage, { inputTokens: 300, cachedTokens: 180, cacheWriteTokens: 30, outputTokens: 3 })
+  assert.deepEqual(h.statuses.at(-1)?.usage, { inputTokens: 300, uncachedInputTokens: 90, cachedTokens: 180, cacheWriteTokens: 30, outputTokens: 3 })
   h.start()
   assert.equal(h.statuses.at(-1)?.usage, undefined)
+  h.engine.dispose()
+})
+
+test("ordinary admitted usage is visible before the first warm request", () => {
+  const h = harness()
+  h.start()(true)
+  h.engine.recordOrdinaryUsage("parent", { uncachedInputTokens: 10, cachedTokens: 90, outputTokens: 5 })
+  assert.deepEqual(h.statuses.at(-1)?.usage, { uncachedInputTokens: 10, cachedTokens: 90, outputTokens: 5 })
   h.engine.dispose()
 })
 

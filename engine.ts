@@ -51,11 +51,20 @@ type State = {
   marks: Mark[]
 }
 
-const usageFields = ["inputTokens", "cachedTokens", "outputTokens", "cacheWriteTokens", "cacheWrite5mTokens", "cacheWrite1hTokens"] as const
+const usageFields = ["inputTokens", "uncachedInputTokens", "cachedTokens", "outputTokens", "cacheWriteTokens", "cacheWrite5mTokens", "cacheWrite1hTokens"] as const
 function addUsage(current: UsageStats | undefined, next: Usage | undefined): UsageStats | undefined {
   if (!next) return current
   const usage: UsageStats = { ...current }
-  for (const field of usageFields) if (next[field] !== undefined) usage[field] = (usage[field] ?? 0) + next[field]!
+  const ordinary = next.inputTokens === undefined && next.uncachedInputTokens !== undefined
+  const inputKnown = next.inputTokens !== undefined && !ordinary && !(current?.inputTokens === undefined && current?.uncachedInputTokens !== undefined)
+  for (const field of usageFields) if (field !== "inputTokens" || inputKnown) {
+    if (next[field] !== undefined) usage[field] = (usage[field] ?? 0) + next[field]!
+  }
+  if (!inputKnown) delete usage.inputTokens
+  if (next.inputTokens !== undefined && next.cachedTokens !== undefined && next.cacheWriteTokens !== undefined) {
+    const uncached = next.inputTokens - next.cachedTokens - next.cacheWriteTokens
+    if (uncached >= 0) usage.uncachedInputTokens = (usage.uncachedInputTokens ?? 0) + uncached
+  }
   return usage
 }
 
@@ -83,6 +92,13 @@ export class WarmingEngine {
   }
 
   has(sessionID: string) { return this.states.has(sessionID) }
+
+  recordOrdinaryUsage(sessionID: string, usage: UsageStats) {
+    const state = this.states.get(sessionID)
+    if (!state || this.disposed) return
+    state.usage = addUsage(state.usage, usage)
+    this.notify(sessionID, state, state.active ? "generating" : "waiting")
+  }
 
   prepare(sessionID: string, eligible: boolean, context: ModelContext = { providerID: "openai", modelID: "gpt-test" },
     metadata: State["metadata"] = {}): string | undefined {

@@ -69,14 +69,18 @@ function tokens(value: number): string {
 }
 
 function uncachedInput(usage: UsageStats): number | undefined {
+  if (usage.uncachedInputTokens !== undefined) return usage.uncachedInputTokens
   if (usage.inputTokens === undefined || usage.cachedTokens === undefined || usage.cacheWriteTokens === undefined) return
   const value = usage.inputTokens - usage.cachedTokens - usage.cacheWriteTokens
   return value >= 0 ? value : undefined
 }
 
 function hitRate(usage: UsageStats): string | undefined {
-  if (usage.inputTokens === undefined || usage.cachedTokens === undefined || usage.inputTokens <= 0) return
-  return `${Math.round(usage.cachedTokens / usage.inputTokens * 1000) / 10}%`
+  const uncached = uncachedInput(usage)
+  if (uncached === undefined || usage.cachedTokens === undefined || usage.cacheWriteTokens === undefined) return
+  const total = uncached + usage.cachedTokens + usage.cacheWriteTokens
+  if (total <= 0) return
+  return `${Math.round(usage.cachedTokens / total * 1000) / 10}%`
 }
 
 function cacheWrite(usage: UsageStats): string | undefined {

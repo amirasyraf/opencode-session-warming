@@ -7,7 +7,7 @@ import type { Diagnostic } from "./diagnostics.ts"
 
 export type Phase = "preparing" | "generating" | "waiting" | "sending" | "stopped" | "expired"
 export type Mark = { at: number; result: "sending" | "completed" | "failed" | "aborted" }
-export type UsageStats = { inputTokens?: number; cachedTokens?: number; outputTokens?: number; cacheWriteTokens?: number;
+export type UsageStats = { inputTokens?: number; uncachedInputTokens?: number; cachedTokens?: number; outputTokens?: number; cacheWriteTokens?: number;
   cacheWrite5mTokens?: number; cacheWrite1hTokens?: number }
 export type WarmStatus = {
   providerID?: string
@@ -39,7 +39,7 @@ const MAX_BYTES = 64 * 1024
 const safeID = (value: string) => /^[A-Za-z0-9_-]{1,128}$/.test(value)
 const number = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0
 const object = (value: unknown): value is { [key: string]: unknown } => typeof value === "object" && value !== null && !Array.isArray(value)
-const usageFields = ["inputTokens", "cachedTokens", "outputTokens", "cacheWriteTokens", "cacheWrite5mTokens", "cacheWrite1hTokens"] as const
+const usageFields = ["inputTokens", "uncachedInputTokens", "cachedTokens", "outputTokens", "cacheWriteTokens", "cacheWrite5mTokens", "cacheWrite1hTokens"] as const
 
 function safeUsage(value: unknown): UsageStats | undefined {
   if (!object(value)) return

@@ -173,9 +173,11 @@ The bar shows elapsed time in the current warming window. Adjacent text shows
 state, next request, remaining time, completed requests, failures, and, after a
 provider reports usage, warm-request input/output and cache token statistics. The
 sidebar may show cache reads, cache writes, uncached input, and a reported cache
-read ratio. These are cumulative for the current warming window. Missing fields
-are omitted rather than treated as zero. A filled bar or a completed response
-does not prove that a cache refresh succeeded.
+read ratio from admitted ordinary root steps and warm requests. These appear as
+soon as an admitted ordinary step reports usage; they do not wait for the first
+warm request. Values are cumulative for the current warming window. Missing
+fields are omitted rather than treated as zero. A filled bar or a completed
+response does not prove that a cache refresh succeeded.
 
 TUI options:
 
