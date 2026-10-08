@@ -1,109 +1,170 @@
 # Agent instructions
 
+## Read first
+
+This repository contains two OpenCode v1.18.x plugins:
+
+- `plugin.ts` is the server plugin.
+- `tui.tsx` is the TUI plugin.
+
+They load from separate OpenCode config files. `README.md` is for humans: keep
+it short, task-oriented, and free of internal implementation contracts.
+This file is for coding agents: put precise invariants and verification rules
+here instead of expanding the README.
+
 ## Scope
 
-This project is a local OpenCode **v1.18.x** plugin for best-effort warming of
-root-session OpenAI API/Codex OAuth and GitHub Copilot HTTP requests. Read `README.md` before
-changing behavior. Its TUI indicator lives in this same project (`tui.tsx`), with
-a separate entry in `tui.json`. API/Copilot GPT-5.6+ Responses and Copilot
-Sonnet/Opus 5+ Messages are supported, along with legacy Codex. Other providers,
-Chat Completions, enterprise/custom endpoints, native LLM execution, and WebSockets are
-unsupported. Do not silently enable transports or change user credentials.
+The plugin warms root-session OpenAI API/Codex OAuth and GitHub Copilot HTTP
+requests. Supported paths are API/Copilot GPT-5.6+ Responses, Copilot Sonnet /
+Opus 5+ Messages, and legacy Codex. Other providers, Chat Completions,
+enterprise/custom endpoints, native LLM execution, WebSockets, provider-hosted
+tools, and stateful provider conversations are unsupported. Do not silently
+enable a transport or change user credentials.
 
-## Invariants
+Keep responsibilities in their current modules:
 
-- Ordinary requests retain their authentication, routing, bytes, cancellation,
-  response metadata, and backpressure. Capture failures must not break them.
-- Capture only explicitly marked requests. Strip the reserved marker before
-  transmission, including late requests after disposal.
-- Warming uses independent HTTP calls: never `session.prompt`, session-history
-  writes, agent/tool execution, or OAuth refresh.
+- `transport.ts`: one process-wide fetch shim; ordinary traffic preservation.
+- `protocol.ts`: bounded request validation and Responses/Messages parsing.
+- `adapters.ts`: explicit provider endpoints and replay policy.
+- `cache-policy.ts`: model floors, defaults, overrides, and precedence.
+- `engine.ts`: scheduling, invalidation, retries, and warm lifecycle.
+- `status.ts`, `indicator.ts`, `tui.tsx`: read-only UI publication and rendering.
+- `journal-schema.ts`, `journal.ts`, `journal-reader.ts`, `journal-cli.ts`:
+  allowlisted metadata persistence and read-only inspection.
+- `ordinary-observer.ts`: live root usage attribution without history reads.
+
+Do not replace this with a generic provider framework, persistent conversation
+store, background daemon, task counter, or conversation reconstruction layer.
+
+## Transport and session invariants
+
+- Ordinary requests keep their authentication, routing, bytes, cancellation,
+  response metadata, body backpressure, and response identity.
+- Capture only requests bearing the plugin's opaque marker. Remove that marker
+  before transmission, including late requests after disposal.
+- Capture failures must fail open and never break an ordinary request.
+- Warming uses independent HTTP calls. Never use `session.prompt`, session
+  history writes, agent/tool execution, or OAuth refresh.
 - Only root sessions warm. New ordinary root-model activity invalidates old
-  warming even when the new request is unsupported. Child activity is independent.
-- Raw transport completion, not session `busy` or processed stream completion,
-  determines whether the parent is still generating.
-- Keep snapshots and authenticated headers in RAM only. Never log their content.
-- The optional metadata journal is automatic by default, independent of debug logs.
-  Persist only reconstructed allowlisted metadata, never SDK/request objects,
-  paths, titles, credentials or raw errors. Keep writes buffered, bounded and
-  independent of warming; uncertain writes are never replayed.
-- Default journal retention to 365 days with no disk cap. The latest supported,
-  journal-enabled startup sets shared policy retroactively. An optional disk target
-  pauses recording; it never authorizes deleting inside-retention history. Preserve
-  unknown/corrupt files and potentially live open segments. Readers/CLI are read-only.
-- Ordinary accounting uses live root OpenAI/Copilot step-finish snapshots, not
-  accumulated assistant cost or latest-step message tokens. Exclude copied history,
-  synthetic/internal/child activity and unknown eligibility. Preserve outcome
-  amendments and ambiguous attribution. OpenCode-normalized zero is not proof of
-  reported upstream usage; reported cost has unspecified units, never presumed USD.
-- Warm attempts have one terminal emission even on invalidation/replacement/late
-  responses. This is not exactly-once persistence or guaranteed remote cancellation.
-- Fence retries and late callbacks. Expiry/disposal/cancellation cannot resurrect
-  state. Warm requests never extend the ordinary activity window.
-- Treat substantially late wall-clock timers as sleep/resume or clock-gap events:
-  invalidate stale warming before sending or retrying a warm request.
-- Reject unimplemented/stateful request shapes and provider-hosted tools.
-- Keep provider endpoint/replay policy in the explicit adapter registry, protocol
-  validation/parsing in `protocol.ts`, and model/request cache policy in
-  `cache-policy.ts`. Numeric model floors never authorize unknown request features.
-- Default GPT-5.6+ refresh to 28 minutes, Claude to 4 minutes or 58 minutes for
-  exclusively one-hour markers. Preserve mixed TTLs and use the shortest selected
-  marker. Gateway TTLs are upstream assumptions/requested values, not guarantees.
-  Resolve model → provider → explicit global → automatic overrides per setting.
+  warming even when the new provider, model, or request is unsupported.
+  Child activity is independent.
+- Raw transport completion, not `session.busy` or processed stream completion,
+  decides when the parent is still generating.
+- Reject stateful references, provider-hosted tools, unimplemented input
+  types, unsupported media, and request bodies over 16 MiB.
+- Support embedded base64 PNG, JPEG, WebP, and GIF images in user messages and
+  function results without changing the replay prefix. Reject remote and file-ID
+  images, files, and audio. Image bytes count toward the body limit.
+- Detect SSE from field prefixes even when the media type is missing or wrong.
+  Require semantic stream completion; HTTP 200 and EOF alone are insufficient.
+- Keep snapshots and authenticated headers in RAM. Never log their content.
+
+## Replay and policy invariants
+
+- Keep provider endpoint and replay policy in the explicit adapter registry.
+  Numeric model floors never authorize unknown request features.
 - Preserve unchanged input for native API prewarm and bounded Copilot replay.
-  Claude replay must retain tool selection, thinking, effort, signatures and cache
-  controls. Discard generated local function calls; never dispatch them. Skip
-  incompatible explicit thinking budgets instead of changing them. Codex's legacy
-  keepalive remains isolated; never invent a Codex output cap or gateway prewarm.
-- Separate success refresh targets (request start) from bounded failure retries.
-  Timer lateness is measured against the actual scheduled wake, not an overdue
-  refresh target. Only explicit output-limit terminal outcomes qualify as bounded
-  completions; neither completion nor usage guarantees a cache refresh.
-- Support embedded base64 PNG/JPEG/WebP/GIF images in user messages and function
-  results without changing their replay prefix. Reject remote/file-ID image
-  references, files and audio; the 16 MiB body limit includes image bytes.
-- Treat missing usage as unknown. Do not claim guaranteed caching or cost savings.
-- Detect warm SSE bodies even with missing/misleading media types; retain bounded
-  parsing and require actual stream completion rather than accepting HTTP 200 alone.
-- Diagnostics must identify failures and retry/abort decisions without raw error
-  messages, stacks, prompts, or headers. Keep log calls bounded and non-blocking;
-  fallback output goes to a bounded file, never the TUI's terminal.
-- Metadata hooks have deadlines. Do not await logging or let failed diagnostics
-  turn into session errors or unhandled promise rejections.
-- The UI is a read-only observer. Its metadata channel must not change warming
-  timers, conversation history, or provider requests. Publish only allowed times,
-  counters, provider/model/policy identifiers and outcome marks; never snapshots,
-  prompt content, or credentials. TTL evidence must not become a fake expiry timer.
-- Keep status writes atomic, coalesced and bounded. Treat missing/stale/dead-owner
-  records as unavailable. A failed UI or publication must not break the engine.
-- Native bar background fill represents elapsed window time, with no glyphs
-  inside the bar. Show request counts, failures and state in adjacent text.
-  Maintain the cool-left/red-right palette, freeze stopped progress, retain
-  readable monochrome status, and default both independently configurable timers on.
-- Prefer the sidebar section after LSP; use a compact prompt-row fallback when
-  hidden, and a bottom-padded fallback for child/permission/question views without
-  a prompt. Never duplicate visible indicators. Bar geometry follows available
-  width. Adjoining colour bands follow `ceil(duration / interval)`, grouping only
-  to fit the terminal or an explicit segment cap; never resize the track based on
-  band count. Preserve a shorter final interval and time-derived fractional frontier
-  shading. Show actual completed/failed totals, not attempted totals as successes.
+- Claude replay retains tool selection, thinking, effort, signatures, cache
+  controls, and cache markers. Discard generated local function calls; never
+  dispatch them.
+- Skip incompatible explicit thinking budgets instead of changing them.
+- Keep Codex's legacy keepalive isolated. Do not invent a Codex output cap or a
+  gateway prewarm mode.
+- Default GPT-5.6+ refresh is 28 minutes. Claude uses 4 minutes, or 58 minutes
+  for exclusively one-hour markers. Mixed TTLs use the shortest selected marker.
+- Resolve settings as model, provider, explicit global, then automatic policy.
+- TTLs are upstream assumptions or requested values, not expiry evidence.
+- Separate success refresh targets, based on request start, from bounded failure
+  retries. A successful response or usage value does not prove a cache refresh.
+- Only an explicit output-limit terminal result qualifies as a bounded
+  completion. Do not accept arbitrary truncated output.
+- Fence retries, late callbacks, expiry, disposal, and cancellation. None may
+  resurrect state or extend the ordinary activity window.
+- Treat substantially late timers as sleep/resume or clock-gap events. Discard
+  stale warming before sending or retrying. Do not send catch-up bursts.
+- Every warm attempt emits one terminal outcome, including invalidation,
+  replacement, and late-response paths. This is not exactly-once persistence
+  and does not guarantee remote cancellation.
 
-## Development
+## Metadata and journal invariants
 
-Use the Node version in `mise.toml`, `npm ci`, and `npm run check`. Server
-dependencies use the OpenCode 1.18.x range; TUI peer packages are pinned to the
-matching OpenTUI release for type checking. `plugin.ts` is the server entry point
-and `tui.tsx` is the TUI entry point; OpenCode loads them from separate config
-files.
+- The journal is enabled by default, retains 365 days by default, and has no
+  default disk cap. A configured disk target pauses recording; it never permits
+  deletion of inside-retention history.
+- Persist reconstructed allowlisted metadata only. Never serialize SDK/request
+  objects, prompts, response text, images, tool payloads, snapshots, headers,
+  credentials, titles, paths, or raw exception text.
+- Writes are buffered, bounded, asynchronous, and independent of warming.
+  Uncertain writes are not replayed. Reader and CLI operations are read-only.
+- The newest supported journal-enabled startup controls shared retention and
+  disk policy, even if an older instance flushes later. Policy records carry a
+  startup timestamp; same-time records use generation order. Preserve
+  corrupt/unknown policy files and live open segments.
+- Recovery reuses the original startup registration. It must not allocate a new
+  policy generation or replace a newer startup's policy.
+- Journal cleanup is segment-granular and must preserve damaged, unknown, and
+  potentially live files. Do not treat a missing record as permission to delete.
+- Ordinary accounting uses live root OpenAI/Copilot step-finish snapshots, not
+  accumulated assistant cost or latest-step message tokens.
+- Exclude copied history, synthetic/internal activity, children, title/summary,
+  compaction, and unknown eligibility. Preserve outcome amendments and ambiguous
+  attribution rather than guessing.
+- Missing usage is unknown. OpenCode-normalized zero is not proof of upstream
+  usage. Reported cost has unspecified units, never presumed USD.
+- The UI metadata bridge publishes only allowed times, counters, provider/model,
+  policy identifiers, and outcome marks. It never changes warming, history, or
+  provider requests.
 
-Complete coherent implementation, tests, and documentation edits before running
-the combined check suite and final Git review. Do not add live provider calls to
-automated tests. The runtime integration test isolates HOME/XDG directories and
-uses a local mock provider; it must never use the user's accounts or global
-OpenCode config. Run `npm run test:runtime` when an `opencode` 1.18.x stable release is available.
-Run `npm run test:tui` for startup changes; it also requires Python 3 and a PTY.
-It must not submit prompts or contact a live model provider.
+## Diagnostics and UI invariants
 
-Keep changes small. Avoid a generic provider framework, persistent conversation storage,
-background daemon, task counters, or conversation reconstruction. Update both
-documentation files when their contracts change.
+- Diagnostics identify failure and retry decisions without raw messages, stacks,
+  prompts, headers, or credentials. Calls are bounded, non-blocking, and safe if
+  the logger rejects or stalls. Fallback output goes to a bounded file, never
+  the TUI terminal.
+- Metadata hooks have deadlines. Failed diagnostics must not become session
+  errors or unhandled promise rejections.
+- Status writes are atomic, coalesced, and bounded. Missing, stale, or dead-owner
+  status is unavailable. Publication failure must not affect the engine.
+- The bar is a native background fill with no glyphs inside it. Adjacent text
+  shows state, request counts, failures, and timers. Preserve the cool-left /
+  red-right palette, readable monochrome mode, frozen stopped progress, and both
+  timers enabled by default.
+- Prefer the sidebar section after LSP. Use the prompt-row fallback when the
+  sidebar is hidden, and the bottom-padded fallback for child, permission, and
+  question views without a prompt. Never display duplicate indicators.
+- Bar width follows available space and does not change with band count.
+  Bands follow `ceil(duration / interval)` and group only to fit the terminal or
+  an explicit segment cap. Preserve a shorter final interval and fractional
+  time-derived frontier shading. Show completed and failed totals, not attempts
+  counted as successes.
+
+## Development and verification
+
+Use the Node version in `mise.toml`:
+
+```sh
+mise install
+npm ci
+npm run check
+```
+
+Complete coherent code, test, and documentation edits before running the
+combined suite. Do not run tests after every small edit. Finish with one review
+of `git status`, `git diff`, and the staged diff.
+
+The unit suite uses fake clocks and mock transports. Do not add live provider
+calls to automated tests. `npm run test:runtime` requires an installed stable
+OpenCode 1.18.x release and isolates HOME/XDG directories with a local mock
+provider. It must never use user accounts or global OpenCode configuration.
+`npm run test:tui` requires Python 3 and a PTY; it must not submit prompts or
+contact a live provider.
+
+When behavior, configuration, support, privacy, or workflow contracts change,
+update both documentation files: explain the user-facing result in `README.md`
+and put the agent-facing constraint in this file. Keep the README readable.
+
+Do not commit, amend, push, deploy, or change credentials unless the user
+explicitly authorizes it. When authorized to publish, stage only intended
+files, inspect the full staged diff, commit in the repository's style, push the
+requested branch, and verify that the local branch and remote match with a
+clean worktree.
