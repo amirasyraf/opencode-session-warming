@@ -161,8 +161,8 @@ try:
                 os.write(master, reply)
         lines, backgrounds = screen(output.decode("utf-8", "replace"))
         text = "\n".join(lines)
-        usage_cache_read = usage_cache_read or "Cache read" in text
-        usage_cache_write = usage_cache_write or "Cache write" in text
+        usage_cache_read = usage_cache_read or "Cache Read" in text
+        usage_cache_write = usage_cache_write or "Cache Write" in text
         if "Update Available" in text and not dismissed_update:
             os.write(master, b"\x1b")
             dismissed_update = True

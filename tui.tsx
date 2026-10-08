@@ -90,6 +90,10 @@ function cacheWrite(usage: UsageStats): string | undefined {
   return `${tokens(usage.cacheWriteTokens)}${detail ? ` (${detail})` : ""}`
 }
 
+function metric(value: number | string | undefined): string {
+  return value === undefined ? "N/A" : typeof value === "number" ? tokens(value) : value
+}
+
 function View(props: { api: TuiPluginApi; options: UiOptions; sidebar?: boolean; bottom?: boolean }) {
   const dimensions = useTerminalDimensions()
   const [now, setNow] = createSignal(Date.now())
@@ -100,6 +104,10 @@ function View(props: { api: TuiPluginApi; options: UiOptions; sidebar?: boolean;
   const usage = createMemo(() => {
     const value = status().status?.usage
     return value ? { value, uncached: uncachedInput(value), hitRate: hitRate(value), cacheWrite: cacheWrite(value) } : undefined
+  })
+  const ttl = createMemo(() => {
+    const value = status().status
+    return value?.ttlMs !== undefined && value.ttlEvidence !== "upstream-assumed" ? remaining(value.ttlMs) : undefined
   })
   const targetWidth = () => props.bottom ? Math.max(0, dimensions().width - 6) : Math.max(0, Math.min(68, Math.floor((dimensions().width - 8) / 2)))
   const layout = createMemo(() => compactLayout(model(), Math.min(targetWidth(), measured() ?? targetWidth()), root().parent))
@@ -150,18 +158,16 @@ function View(props: { api: TuiPluginApi; options: UiOptions; sidebar?: boolean;
         <Show when={model().hasWindow}><box paddingTop={1} paddingBottom={1}><Bar api={props.api} options={props.options} model={model()} /></box></Show>
         <Show when={model().detail}><text fg={theme().textMuted} wrapMode="word">{model().detail}</text></Show>
         <Show when={status().status?.model}><Stat api={props.api} label={status().status?.providerID === "github-copilot" ? "Copilot" : "OpenAI"} value={status().status!.model!} /></Show>
-        <Show when={status().status?.ttlMs}><Stat api={props.api} label={status().status?.ttlEvidence === "documented" ? "Cache TTL" :
-          status().status?.ttlEvidence === "requested" ? "TTL requested" : "TTL assumed"} value={remaining(status().status!.ttlMs!)} /></Show>
-        <Show when={model().next}>{(value) => <Stat api={props.api} label="Next request" value={value()} />}</Show>
-        <Show when={model().left}>{(value) => <Stat api={props.api} label="Window left" value={value()} />}</Show>
-        <Show when={model().completed !== undefined}><Stat api={props.api} label="Requests Sent" value={String(model().completed)} /></Show>
-        <Show when={usage()?.value.inputTokens !== undefined}><Stat api={props.api} label="Input tokens" value={tokens(usage()!.value.inputTokens!)} /></Show>
-        <Show when={usage()?.value.cachedTokens !== undefined}><Stat api={props.api} label="Cache read" value={tokens(usage()!.value.cachedTokens!)} /></Show>
-        <Show when={usage()?.cacheWrite !== undefined}><Stat api={props.api} label="Cache write" value={usage()!.cacheWrite!} /></Show>
-        <Show when={usage()?.uncached !== undefined}><Stat api={props.api} label="Uncached input" value={tokens(usage()!.uncached!)} /></Show>
-        <Show when={usage()?.hitRate !== undefined}><Stat api={props.api} label="Cache hit rate" value={usage()!.hitRate!} /></Show>
-        <Show when={usage()?.value.outputTokens !== undefined}><Stat api={props.api} label="Output tokens" value={tokens(usage()!.value.outputTokens!)} /></Show>
-        <Show when={model().failed}><Stat api={props.api} label="Failed" value={String(model().failed)} warning={props.options.color} /></Show>
+        <Show when={status().status}><Stat api={props.api} label="Cache TTL" value={metric(ttl())} /></Show>
+        <Show when={status().status}><Stat api={props.api} label="Next Request" value={metric(model().next)} /></Show>
+        <Show when={status().status}><Stat api={props.api} label="Window Left" value={metric(model().left)} /></Show>
+        <Show when={status().status}><Stat api={props.api} label="Requests Sent" value={String(model().completed ?? 0)} /></Show>
+        <Show when={status().status}><Stat api={props.api} label="Input Tokens" value={metric(usage()?.value.inputTokens)} /></Show>
+        <Show when={status().status}><Stat api={props.api} label="Cache Read" value={metric(usage()?.value.cachedTokens)} /></Show>
+        <Show when={status().status}><Stat api={props.api} label="Cache Write" value={metric(usage()?.cacheWrite)} /></Show>
+        <Show when={status().status}><Stat api={props.api} label="Cache Hit Rate" value={metric(usage()?.hitRate)} /></Show>
+        <Show when={status().status}><Stat api={props.api} label="Output Tokens" value={metric(usage()?.value.outputTokens)} /></Show>
+        <Show when={status().status}><Stat api={props.api} label="Failed" value={String(model().failed ?? 0)} warning={props.options.color && !!model().failed} /></Show>
       </box>
     </Show>
   )

@@ -172,12 +172,12 @@ status. The UI is an observer; it does not change timers, requests, or history.
 The bar shows elapsed time in the current warming window. Adjacent text shows
 state, next request, remaining time, completed requests, failures, and, after a
 provider reports usage, warm-request input/output and cache token statistics. The
-sidebar may show cache reads, cache writes, uncached input, and a reported cache
-read ratio from admitted ordinary root steps and warm requests. These appear as
-soon as an admitted ordinary step reports usage; they do not wait for the first
-warm request. Values are cumulative for the current warming window. Missing
-fields are omitted rather than treated as zero. A filled bar or a completed
-response does not prove that a cache refresh succeeded.
+The sidebar keeps its stat rows stable while status is available. It shows cache
+reads, cache writes, a reported cache-read ratio, and output tokens from admitted
+ordinary root steps and warm requests. Values appear as soon as an admitted
+ordinary step reports usage; unavailable values remain `N/A`. Values are
+cumulative for the current warming window. A filled bar or a completed response
+does not prove that a cache refresh succeeded.
 
 TUI options:
 
