@@ -131,10 +131,10 @@ store, background daemon, task counter, or conversation reconstruction layer.
   timers enabled by default.
 - The sidebar may show cumulative provider-reported warm and admitted ordinary
   root-step input, output, cache read/write, and cache-read ratio values for the
-  current window. Keep stat rows stable while status is available;
-  render unavailable values as N/A. Never turn normalized zero into proof of
-  upstream usage, and do not present the ratio or token values as proof of cache
-  refresh or as a dollar-cost estimate.
+  current window. Keep supported stat rows stable while status is available;
+  render unavailable values as N/A and omit unsupported metrics. Never turn
+  normalized zero into proof of upstream usage, and do not present the ratio or
+  token values as proof of cache refresh or as a dollar-cost estimate.
 - Prefer the sidebar section after LSP. Use the prompt-row fallback when the
   sidebar is hidden, and the bottom-padded fallback for child, permission, and
   question views without a prompt. Never display duplicate indicators.
