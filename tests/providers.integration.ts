@@ -11,6 +11,7 @@ import { setTimeout as sleep } from "node:timers/promises"
 import { CAPTURE_HEADER } from "../protocol.ts"
 import { readStatus } from "../status.ts"
 import { isSupportedOpenCodeVersion } from "../compatibility.ts"
+import { readSegment, segmentFiles } from "../journal-reader.ts"
 import { imageURL } from "./helpers.ts"
 
 const targets = [
@@ -206,6 +207,25 @@ test("installed v1 preserves authenticated OpenAI/Copilot prefixes while warming
       const directory = join(home, "state", "opencode", "session-warming", "status")
       await wait(async () => ((await readStatus(session, directory)).status?.completed ?? 0) > 0, "completed status")
       assert.equal((await readStatus(session, directory)).status?.providerID, target.providerID)
+      await wait(async () => {
+        let warmCompleted = false, ordinaryUsage = false
+        for await (const path of segmentFiles(join(home, "state", "opencode", "session-warming", "events"))) {
+          for await (const { record, issue } of readSegment(path)) {
+            assert.equal(issue, undefined)
+            if (record?.recordKind !== "event") continue
+            assert.equal(JSON.stringify(record).includes(imageURL.split(",")[1]!), false)
+            assert.equal(JSON.stringify(record).includes("integration-only"), false)
+            if (record.sessionID !== session) continue
+            if (record.event === "warm.completed") warmCompleted = true
+            if (record.event === "ordinary.step-usage") {
+              ordinaryUsage = true
+              assert.equal(record.costUnit, "unspecified")
+              assert.equal(record.cacheReadTokens, 90)
+            }
+          }
+        }
+        return warmCompleted && ordinaryUsage
+      }, "ordinary and warm journal metadata")
       delegated.delete(session)
       const previous = requests.filter((request) => request.session === session && request.warm).length
       const cancelledPrompt = api(`/session/${session}/message`, { model: { providerID: target.providerID, modelID: target.modelID },

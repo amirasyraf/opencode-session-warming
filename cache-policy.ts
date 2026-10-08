@@ -1,10 +1,13 @@
 import { object } from "./protocol.ts"
+import { DAY_MS } from "./journal-schema.ts"
+import type { JournalOptions } from "./journal-schema.ts"
 
 export type Override = { enabled?: boolean; intervalMs?: number }
 export type ProviderOverride = Override & { models?: Record<string, Override> }
 export type Settings = Override & {
   enabled: boolean; durationMs: number; debug?: boolean
   providers?: Record<string, ProviderOverride>
+  journal?: JournalOptions
 }
 export type CacheProfile = {
   ttlMs?: number; ttlEvidence: "documented" | "upstream-assumed" | "requested"
@@ -19,9 +22,17 @@ const identifier = /^[A-Za-z0-9_.-]{1,160}$/
 const timer = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= MAX_TIMER
 
 export function settingsError(options: Record<string, unknown> = {}): string | undefined {
-  if (Object.keys(options).some((key) => !["enabled", "intervalMs", "durationMs", "debug", "providers"].includes(key))) return "unknown-option"
+  if (Object.keys(options).some((key) => !["enabled", "intervalMs", "durationMs", "debug", "providers", "journal"].includes(key))) return "unknown-option"
   if (options.enabled !== undefined && typeof options.enabled !== "boolean") return "invalid-enabled"
   if (options.debug !== undefined && typeof options.debug !== "boolean") return "invalid-debug"
+  if (options.journal !== undefined) {
+    const value = options.journal
+    if (!object(value) || Object.keys(value).some((key) => !["enabled", "retentionDays", "maxBytes"].includes(key))) return "invalid-journal"
+    if (value.enabled !== undefined && typeof value.enabled !== "boolean") return "invalid-journal-enabled"
+    if (value.retentionDays !== undefined && (typeof value.retentionDays !== "number" || !Number.isSafeInteger(value.retentionDays) ||
+      value.retentionDays <= 0 || !Number.isSafeInteger(value.retentionDays * DAY_MS) || value.retentionDays * DAY_MS > 8_640_000_000_000_000)) return "invalid-journal-retention"
+    if (value.maxBytes !== undefined && (typeof value.maxBytes !== "number" || !Number.isSafeInteger(value.maxBytes) || value.maxBytes < 8 * 1024 * 1024)) return "invalid-journal-max-bytes"
+  }
   const duration = options.durationMs ?? 3_600_000
   if (!timer(duration)) return "invalid-duration"
   if (options.intervalMs !== undefined && !timer(options.intervalMs)) return "invalid-interval"
@@ -47,7 +58,8 @@ export function settings(options: Record<string, unknown> = {}): Settings | unde
   if (settingsError(options)) return
   // Copy validated options: caller mutation cannot change an active policy.
   return { ...JSON.parse(JSON.stringify(options)), enabled: options.enabled ?? true,
-    durationMs: options.durationMs ?? 3_600_000, debug: options.debug ?? false }
+    durationMs: options.durationMs ?? 3_600_000, debug: options.debug ?? false,
+    journal: { enabled: true, retentionDays: 365, ...(options.journal as object | undefined) } }
 }
 
 export function resolvePolicy(config: Settings, providerID: string, modelID: string,

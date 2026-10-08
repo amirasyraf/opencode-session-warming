@@ -8,6 +8,7 @@ import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import plugin from "../plugin.ts"
 import { CAPTURE_HEADER } from "../protocol.ts"
 import { completedResponse, ordinary } from "./helpers.ts"
+import { readSegment, segmentFiles } from "../journal-reader.ts"
 
 const stateHome = await mkdtemp(join(tmpdir(), "warming-plugin-unit-"))
 const previousStateHome = process.env.XDG_STATE_HOME
@@ -20,14 +21,14 @@ after(async () => {
 
 type Input = Parameters<NonNullable<Hooks["chat.params"]>>[0]
 const input = (sessionID = "root", agent = "build", providerID = "openai", messageID = "user") => ({
-  sessionID, agent, model: { providerID, api: { id: "gpt-test" } }, message: { id: messageID },
+  sessionID, agent, model: { id: "gpt-test", providerID, api: { id: "gpt-test" } }, message: { id: messageID },
 }) as Input
 const params = { temperature: 1, topP: 1, topK: 1, maxOutputTokens: undefined, options: {} }
 
 const wire: RequestInit[] = []
 globalThis.fetch = (async (_url, init) => { wire.push(init!); return completedResponse() }) as typeof fetch
 
-async function harness(get?: (id: string) => Promise<unknown>) {
+async function harness(get?: (id: string) => Promise<unknown>, overrides: Record<string, unknown> = {}) {
   const logs: Record<string, unknown>[] = []
   const client = {
     session: { get: async ({ path }: { path: { id: string } }) => ({ data: get ? await get(path.id) : {
@@ -35,7 +36,7 @@ async function harness(get?: (id: string) => Promise<unknown>) {
     } }) },
     app: { log: async ({ body }: { body: { extra: Record<string, unknown> } }) => { logs.push(body.extra) } },
   }
-  const hooks = await plugin({ client } as unknown as PluginInput, { intervalMs: 60000, durationMs: 120000, debug: true })
+  const hooks = await plugin({ client } as unknown as PluginInput, { intervalMs: 60000, durationMs: 120000, debug: true, ...overrides })
   async function headers(value = input()) {
     await hooks["chat.params"]!(value, params)
     const out = { headers: {} as Record<string, string> }
@@ -154,6 +155,25 @@ test("metadata lookup cannot indefinitely block the parent request", { timeout: 
   await h.hooks["chat.headers"]!(input(), out)
   assert.deepEqual(out.headers, {})
   await h.hooks.dispose!()
+})
+
+test("journal observes ordinary root usage with warming overridden off and debug disabled", async () => {
+  const h = await harness(undefined, { providers: { openai: { enabled: false } }, debug: false })
+  const created = Date.now() - 1
+  assert.deepEqual(await h.headers(input("observed-root")), {})
+  await h.hooks.event!({ event: { type: "message.updated", properties: { info: { id: "observed-assistant", role: "assistant",
+    sessionID: "observed-root", parentID: "user", providerID: "openai", modelID: "gpt-test", mode: "build", time: { created } } } } as any })
+  await h.hooks.event!({ event: { type: "message.part.updated", properties: { part: { id: "observed-step", sessionID: "observed-root",
+    messageID: "observed-assistant", type: "step-finish", cost: 0.25,
+    tokens: { input: 10, output: 2, reasoning: 3, cache: { read: 90, write: 0 } } } } } as any })
+  await h.hooks.dispose!()
+  const observed = []
+  for await (const path of segmentFiles(join(stateHome, "opencode", "session-warming", "events"))) {
+    for await (const { record } of readSegment(path)) if (record?.recordKind === "event" && record.partID === "observed-step") observed.push(record)
+  }
+  assert.equal(observed.length, 1)
+  assert.equal(observed[0]!.uncachedInputTokens, 10)
+  assert.equal(observed[0]!.costSource, "opencode-step")
 })
 
 test("Copilot target models are marked; switching to older/other models invalidates preparation", async () => {

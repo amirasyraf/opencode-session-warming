@@ -38,6 +38,9 @@ type State = {
   timer?: unknown
   wakeAt?: number
   warm?: AbortController
+  finishWarm?: (value: Diagnostic) => void
+  windowID?: string
+  metadata: { ordinaryCallID?: string; userMessageID?: string; configuredModelID?: string }
   pending?: Observation
   warms: number
   startedAt: number
@@ -71,12 +74,16 @@ export class WarmingEngine {
 
   has(sessionID: string) { return this.states.has(sessionID) }
 
-  prepare(sessionID: string, eligible: boolean, context: ModelContext = { providerID: "openai", modelID: "gpt-test" }): string | undefined {
+  prepare(sessionID: string, eligible: boolean, context: ModelContext = { providerID: "openai", modelID: "gpt-test" },
+    metadata: State["metadata"] = {}): string | undefined {
     this.invalidate(sessionID, "ordinary-activity")
     if (this.disposed || !this.config.enabled || !eligible) return
     const policy = resolvePolicy(this.config, context.providerID, context.modelID, initialProfile(context.modelID))
-    if (!policy.enabled) { this.inactive(sessionID, "configured-off", context); return }
-    const state: State = { context, policy, token: randomUUID(), attempt: 0, warms: 0, active: false,
+    if (!policy.enabled) {
+      this.emit({ event: "skipped", sessionID, ...metadata, providerID: context.providerID, model: context.modelID, reason: "configured-off" })
+      this.inactive(sessionID, "configured-off", context); return
+    }
+    const state: State = { context, policy, metadata, token: randomUUID(), attempt: 0, warms: 0, active: false,
       startedAt: this.clock.now(), completed: 0, failed: 0, marks: [] }
     this.states.set(sessionID, state)
     // Also expire preparation that never reaches the HTTP transport.
@@ -95,13 +102,15 @@ export class WarmingEngine {
     if (state.warm) {
       const last = state.marks.at(-1)
       if (last?.result === "sending") last.result = "aborted"
+      state.finishWarm?.({ event: "warm-aborted", reason, retryable: false, errorCategory: "aborted" })
       state.warm.abort(reason)
     }
     if (state.pending) state.pending.complete = undefined
     state.pending = undefined
     state.snapshot = undefined
     this.http.remove(state.token)
-    this.emit({ event: "stopped", sessionID, reason })
+    this.emit({ event: "stopped", sessionID, reason, windowID: state.windowID, ...state.metadata,
+      providerID: state.context.providerID, model: state.context.modelID })
     this.notify(sessionID, state, reason === "expired" ? "expired" : "stopped", reason)
   }
 
@@ -118,7 +127,7 @@ export class WarmingEngine {
     if (this.disposed) return
     this.notify(sessionID, { context, policy: { enabled: false,
       intervalMs: this.config.intervalMs ?? LEGACY_INTERVAL_MS, intervalSource: "automatic", ttlEvidence: "upstream-assumed" },
-      token: "", attempt: 0, warms: 0, active: false, startedAt: this.clock.now(),
+      token: "", metadata: {}, attempt: 0, warms: 0, active: false, startedAt: this.clock.now(),
       expiresAt: 0, completed: 0, failed: 0, marks: [] }, "stopped", reason)
   }
 
@@ -157,6 +166,9 @@ export class WarmingEngine {
     if (state.expiresAt !== undefined && this.clock.now() >= state.expiresAt) {
       this.invalidate(sessionID, "expired"); return
     }
+    state.finishWarm?.({ event: "warm-aborted", reason: "ordinary-activity", retryable: false, errorCategory: "aborted" })
+    if (state.windowID) this.emit({ event: "window-ended", sessionID, reason: "ordinary-activity", windowID: state.windowID, ...state.metadata,
+      providerID: state.context.providerID, model: state.context.modelID })
     state.warm?.abort("ordinary-activity")
     state.warm = undefined
     if (state.pending) state.pending.complete = undefined
@@ -165,6 +177,9 @@ export class WarmingEngine {
     state.active = true
     const attempt = ++state.attempt
     const now = this.clock.now()
+    state.windowID = randomUUID()
+    this.emit({ event: "window-started", sessionID, windowID: state.windowID, ...state.metadata,
+      providerID: state.context.providerID, model: state.context.modelID, startedAt: now })
     state.startedAt = now
     state.warms = 0
     state.completed = 0
@@ -173,7 +188,8 @@ export class WarmingEngine {
     state.expiresAt = now + this.config.durationMs
     const result = capture(state.context, url, init)
     if (!result.replay) {
-      this.emit({ event: "skipped", sessionID, providerID: state.context.providerID, model: state.context.modelID, reason: result.reason })
+      this.emit({ event: "skipped", sessionID, windowID: state.windowID, ...state.metadata,
+        providerID: state.context.providerID, model: state.context.modelID, reason: result.reason })
       this.invalidate(sessionID, result.reason)
       return
     }
@@ -191,12 +207,14 @@ export class WarmingEngine {
       if (this.clock.now() >= state.expiresAt!) { this.invalidate(sessionID, "expired"); return }
       if (ok) {
         state.snapshot = snapshot
-        this.emit({ event: "captured", sessionID, providerID: state.context.providerID, model: state.context.modelID,
+        this.emit({ event: "captured", sessionID, windowID: state.windowID, ...state.metadata, completedAt: this.clock.now(),
+          providerID: state.context.providerID, model: state.context.modelID,
           adapterID: snapshot.adapterID, strategy: snapshot.strategy, ...state.policy,
           nextAttemptAt: Math.max(this.clock.now(), state.nextAt!) < state.expiresAt! ? Math.max(this.clock.now(), state.nextAt!) : undefined,
           expiresAt: state.expiresAt })
       } else {
-        this.emit({ event: "capture-failed", sessionID, providerID: state.context.providerID, model: state.context.modelID, reason: "ordinary-transport-failed", ...failure })
+        this.emit({ event: "capture-failed", sessionID, windowID: state.windowID, ...state.metadata,
+          providerID: state.context.providerID, model: state.context.modelID, reason: "ordinary-transport-failed", ...failure })
       }
       // Leave registration alive for ordinary transport retries using the same marker.
       this.schedule(sessionID, state)
@@ -247,7 +265,7 @@ export class WarmingEngine {
     // Retry throttling is independent of long successful-refresh intervals.
     let delay = Math.min(state.policy.intervalMs, 30_000)
     let succeeded = false
-    const context = { sessionID, providerID: state.context.providerID, model: state.context.modelID,
+    const context = { sessionID, windowID: state.windowID, ...state.metadata, providerID: state.context.providerID, model: state.context.modelID,
       adapterID: state.snapshot.adapterID, strategy: state.snapshot.strategy,
       attemptID: randomUUID(), attempt: ++state.warms, expiresAt: state.expiresAt }
     const mark: Mark = { at: startedAt, result: "sending" }
@@ -257,6 +275,14 @@ export class WarmingEngine {
     let status: number | undefined
     let requestID: string | undefined
     const currentWarm = () => this.current(sessionID, state) && state.warm === controller
+    let finished = false
+    const finish = (value: Diagnostic) => {
+      if (finished) return
+      finished = true
+      if (state.finishWarm === finish) state.finishWarm = undefined
+      this.emit({ ...context, status, requestID, elapsedMs: Math.max(0, this.clock.now() - startedAt), ...value })
+    }
+    state.finishWarm = finish
     this.emit({ event: "warm-started", ...context })
     try {
       const response = await abortableFetch(this.http.fetch, state.snapshot.snapshot.url, state.snapshot.request(controller.signal), controller.signal)
@@ -267,7 +293,7 @@ export class WarmingEngine {
         mark.result = "failed"
         if (currentWarm()) state.failed++
         void response.body?.cancel().catch(() => {})
-        this.emit({ event: "warm-failed", ...context, status, requestID, retryable: false,
+        finish({ event: "warm-failed", retryable: false,
           reason: [401, 403].includes(status) ? "http-auth" : "http-incompatible", elapsedMs: this.clock.now() - startedAt })
         if (this.current(sessionID, state) && state.warm === controller) this.invalidate(sessionID, `http-${response.status}`)
         return
@@ -277,7 +303,7 @@ export class WarmingEngine {
         if (currentWarm()) state.failed++
         if (response.status === 429) delay = Math.max(delay, retryAfterMs(response.headers.get("retry-after"), this.clock.now()))
         void response.body?.cancel().catch(() => {})
-        this.emit({ event: "warm-failed", ...context, status, requestID, retryable: this.clock.now() + delay < state.expiresAt!,
+        finish({ event: "warm-failed", retryable: this.clock.now() + delay < state.expiresAt!,
           reason: status === 429 ? "http-rate-limit" : status >= 500 ? "http-server" : "http-error",
           elapsedMs: this.clock.now() - startedAt,
           nextAttemptAt: this.clock.now() + delay < state.expiresAt! ? this.clock.now() + delay : undefined })
@@ -288,7 +314,7 @@ export class WarmingEngine {
         delay = Math.max(Math.min(state.policy.intervalMs, 1000), startedAt + state.policy.intervalMs - this.clock.now())
         mark.result = "completed"
         if (currentWarm()) state.completed++
-        this.emit({ event: "warm-completed", ...context, status, requestID, elapsedMs: this.clock.now() - startedAt,
+        finish({ event: "warm-completed", elapsedMs: this.clock.now() - startedAt,
           nextAttemptAt: this.clock.now() + delay < state.expiresAt! ? this.clock.now() + delay : undefined,
           inputTokens: usage?.inputTokens, cachedTokens: usage?.cachedTokens, outputTokens: usage?.outputTokens,
           cacheWriteTokens: usage?.cacheWriteTokens, cacheWrite5mTokens: usage?.cacheWrite5mTokens,
@@ -298,7 +324,7 @@ export class WarmingEngine {
       this.clockCurrent(sessionID, state)
       mark.result = controller.signal.aborted ? "aborted" : "failed"
       if (!controller.signal.aborted && currentWarm()) state.failed++
-      this.emit({ event: controller.signal.aborted ? "warm-aborted" : "warm-failed", ...context, status, requestID,
+      finish({ event: controller.signal.aborted ? "warm-aborted" : "warm-failed",
         reason: controller.signal.aborted ? String(controller.signal.reason) : "request-failed",
         elapsedMs: this.clock.now() - startedAt,
         retryable: this.current(sessionID, state) && state.warm === controller && this.clock.now() + delay < state.expiresAt!,

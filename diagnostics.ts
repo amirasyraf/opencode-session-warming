@@ -63,6 +63,7 @@ export function abortableFetch(fetcher: typeof fetch, url: string, init: Request
 }
 
 const fields = new Set(["event", "sessionID", "reason", "providerID", "model", "attemptID", "attempt", "requestID",
+  "windowID", "ordinaryCallID", "userMessageID", "configuredModelID", "startedAt", "completedAt",
   "status", "elapsedMs", "nextAttemptAt", "expiresAt", "intervalMs", "durationMs", "timeoutMs", "metadataTimeoutMs",
   "inputTokens", "cachedTokens", "outputTokens", "cacheWriteTokens", "cacheWrite5mTokens", "cacheWrite1hTokens", "outputLimitReached",
   "adapterID", "strategy", "ttlMs", "ttlEvidence", "intervalSource", "errorCategory", "errorCode", "retryable", "version", "dropped"])
@@ -80,10 +81,10 @@ function safeDiagnostic(value: Diagnostic): Diagnostic {
 
 function levelFor(value: Diagnostic): Level {
   if (value.event === "internal-error" || (value.event === "disabled" && value.reason !== "configured-off" && value.reason !== "unsupported-transport")) return "error"
-  if (value.event === "warm-failed" || value.event === "capture-failed" || value.event === "ui-status-failed" || value.event === "policy-warning" ||
+  if (value.event === "warm-failed" || value.event === "capture-failed" || value.event === "ui-status-failed" || value.event === "policy-warning" || value.event === "journal-degraded" ||
       (value.event === "warm-aborted" && value.reason === "request-timeout") ||
       (value.event === "skipped" && value.reason === "session-metadata-unavailable")) return "warn"
-  if (["scheduled", "warm-started", "ordinary-usage"].includes(value.event) ||
+  if (["scheduled", "warm-started", "ordinary-usage", "window-started", "window-ended"].includes(value.event) ||
       (value.event === "stopped" && value.reason === "ordinary-activity")) return "debug"
   return "info"
 }
@@ -102,7 +103,7 @@ async function appendFallback(entry: LogEntry): Promise<void> {
 
 /** Fire-and-forget, at most eight sink calls; a failed sink is retired until restart. */
 export function createDiagnostics(sink: Sink, options: {
-  debug?: boolean; timeoutMs?: number; fallback?: (entry: LogEntry) => Promise<void>
+  debug?: boolean; timeoutMs?: number; fallback?: (entry: LogEntry) => Promise<void>; onDegraded?: (value: Diagnostic) => void
 } = {}) {
   let inFlight = 0
   let dropped = 0
@@ -128,6 +129,7 @@ export function createDiagnostics(sink: Sink, options: {
     }, options.timeoutMs ?? 2000, "logger-timeout").catch((error: unknown) => {
       if (!degraded) {
         degraded = true
+        try { options.onDegraded?.({ event: "logging-degraded", ...errorDetails(error) }) } catch { /* Optional observer. */ }
         fallbackWrite({ service: "session-warming", level: "warn", message: "[session-warming] logging-degraded",
           extra: { event: "logging-degraded", ...errorDetails(error) } })
       }

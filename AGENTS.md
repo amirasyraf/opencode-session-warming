@@ -23,6 +23,21 @@ unsupported. Do not silently enable transports or change user credentials.
 - Raw transport completion, not session `busy` or processed stream completion,
   determines whether the parent is still generating.
 - Keep snapshots and authenticated headers in RAM only. Never log their content.
+- The optional metadata journal is automatic by default, independent of debug logs.
+  Persist only reconstructed allowlisted metadata, never SDK/request objects,
+  paths, titles, credentials or raw errors. Keep writes buffered, bounded and
+  independent of warming; uncertain writes are never replayed.
+- Default journal retention to 365 days with no disk cap. The latest supported,
+  journal-enabled startup sets shared policy retroactively. An optional disk target
+  pauses recording; it never authorizes deleting inside-retention history. Preserve
+  unknown/corrupt files and potentially live open segments. Readers/CLI are read-only.
+- Ordinary accounting uses live root OpenAI/Copilot step-finish snapshots, not
+  accumulated assistant cost or latest-step message tokens. Exclude copied history,
+  synthetic/internal/child activity and unknown eligibility. Preserve outcome
+  amendments and ambiguous attribution. OpenCode-normalized zero is not proof of
+  reported upstream usage; reported cost has unspecified units, never presumed USD.
+- Warm attempts have one terminal emission even on invalidation/replacement/late
+  responses. This is not exactly-once persistence or guaranteed remote cancellation.
 - Fence retries and late callbacks. Expiry/disposal/cancellation cannot resurrect
   state. Warm requests never extend the ordinary activity window.
 - Treat substantially late wall-clock timers as sleep/resume or clock-gap events:

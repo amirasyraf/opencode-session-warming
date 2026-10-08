@@ -170,6 +170,7 @@ status rather than inventing progress.
 | `durationMs` | `3600000` (1 hour) | Maximum warming window after the latest ordinary root-model request starts. |
 | `debug` | `false` | Include routine scheduling, attempt-start, and ordinary-usage events at debug level. |
 | `providers` | none | Exact provider-ID overrides for `intervalMs`, `enabled`, and nested model overrides. |
+| `journal` | enabled, 365 days | Local metadata history; see [Observability](#observability). |
 
 The one-hour default covers long subagent waits. Supplied time settings must be
 positive safe integers, at most `2147483647` milliseconds, with `intervalMs`
@@ -363,11 +364,150 @@ not zero. Existing ordinary-message token metadata is logged when available.
 
 To disable, set `enabled: false` or remove the entry, then restart OpenCode.
 
+## Observability
+
+A local, metadata-only JSONL journal collects automatically, independently of
+`debug` and OpenCode's logging service. No dashboard or background service is
+required. The files are a foundation for future analytics, not a complete or
+tamper-evident audit ledger.
+
+```jsonc
+{
+  "journal": {
+    "enabled": true,
+    "retentionDays": 365
+    // Optional: "maxBytes": 134217728
+  }
+}
+```
+
+`journal.enabled: false` turns persistence off without changing warming or log
+verbosity. `retentionDays` is a positive whole number; its millisecond product must
+fit safe timestamp arithmetic. `maxBytes`, when supplied, is a safe whole number
+of at least 8 MiB. Unknown/invalid journal options disable the entire plugin, just
+like invalid warming settings. Quit and restart OpenCode after changing settings.
+Global `enabled: false` writes no journal. Native/WebSocket/channel guards write
+only bounded startup/disabled metadata and do not observe ordinary activity or
+change shared retention policy.
+
+### Data and retention
+
+Files live under `~/.local/state/opencode/session-warming/events/`, or the matching
+`$XDG_STATE_HOME/opencode/session-warming/events/`. Each plugin instance has a
+unique run ID and its own segments, rotating at 4 MiB or the next UTC recording
+date. `.open` files are in-progress or unresolved; `.jsonl` files were closed
+normally. Directories/files are created privately (`0700`/`0600`). Shutdown keeps
+history. Existing live TUI status files remain separate and ephemeral.
+
+**There is no default disk cap.** History is retained for 365 days by default.
+Startup/hourly cleanup removes only verifiably expired segments, using recording
+time rather than source-message time. Potentially live open files and damaged or
+unknown-schema segments are preserved. Retention is segment-granular, so some
+older records may remain longer than the configured period.
+
+The most recent journal-enabled, supported startup sets shared retention and
+optional disk policy for all instances using that state directory. Policy uses
+numbered atomic registrations under `session-warming/policy/`; delayed older
+registrations cannot overwrite newer ones. Empty generation reservations are kept
+as allocation markers; recovery reuses the original startup registration rather
+than publishing a new policy generation. Shortening retention applies retroactively. Longer
+retention cannot restore deleted data. Cleanup checks shared policy per file in
+bounded batches, so changes affect subsequent deletion decisions.
+
+An optional `maxBytes` is a **soft collection threshold**, measured using regular
+files' logical sizes, not physical disk allocation. It pauses new recording rather
+than deleting younger history. Shared size is scanned at startup and every 30
+seconds; concurrent writers can temporarily exceed the threshold. Raising/removing
+the threshold takes effect through another supported journal-enabled startup.
+
+### What the journal records
+
+- Runs, ordinary transport windows, warming attempts, completion/failure/abort
+  outcomes, retries, skip/stop reasons, effective policy and safe diagnostics.
+- Live ordinary OpenAI/Copilot **root** activity and step usage, including skipped
+  shapes/models and provider/model warming-disabled overrides. Other providers
+  contribute skip decisions only. Children, title/summary and compaction calls,
+  copied fork history and synthetic activity without model-call evidence are excluded.
+- Opaque project/session/user/assistant/part IDs, configured and native API model
+  IDs, provider request IDs when available, source timestamps and correlation IDs.
+- Collection-health snapshots: queue/storage/pressure drops, uncertain writes,
+  metadata exclusions, cache evictions and unresolved attribution.
+
+No prompts, response text, images, tool payloads, snapshots, credentials, headers,
+raw exception text, session titles or filesystem paths are written. Missing or
+ambiguous context is omitted or counted; no message-history API calls are made to
+fill gaps. These IDs still identify your local activity; keep exports private.
+
+The first line of each segment is a schema-1 `recordKind: "segment"` header.
+Events have `recordKind: "event"`, a fixed event name, `runID`, `seq`, `eventID`,
+UTC `recordedAt` and monotonic `runElapsedMs`. Event names include `warm.started`,
+`warm.completed`, `warm.failed`, `warm.aborted`, `ordinary.call-started`,
+`ordinary.step-usage`, `ordinary.message-completed`, and `journal.health`.
+Sequence gaps can indicate dropped events; retention-pruned prefixes are expected.
+`ordinary.call-started` is hook intent, not proof that a billable HTTP call happened.
+
+Ordinary usage comes from **per-step source parts**, not assistant accumulated
+cost or latest-step message tokens. It records uncached input, cache reads/writes,
+non-reasoning output and reasoning separately. `usageSource: "opencode-normalized"`
+means upstream availability is unknown: OpenCode can normalize missing usage into
+zero. `reportedCost` has `costSource: "opencode-step"` and `costUnit: "unspecified"`;
+Copilot values may be quota-derived, so do not interpret them as dollars or billed
+cash. Warm usage uses `usageSource: "provider-response"`; missing values stay unknown.
+
+Usage and completed-message records are **keyed snapshots**. Identical re-deliveries
+are suppressed while cached; corrections and later error amendments are retained.
+Use project/session/assistant/part identity for usage deduplication, and
+project/session/assistant identity for outcome snapshots. Do not sum repeated
+snapshots or silently resolve conflicting cross-run observations by wall-clock time.
+Neither warm completion nor cache reads demonstrate savings.
+
+### Inspect and export
+
+From this checkout, using its pinned Node version:
+
+```sh
+npm run --silent journal -- validate
+npm run --silent journal -- export --from 2026-10-01 --to 2026-11-01 --provider openai
+```
+
+Use `--silent` to keep npm's script banner out of machine-readable output.
+`validate` emits JSON integrity/coverage information. `export` streams validated
+events as NDJSON on stdout, with a coverage summary on stderr. Both are read-only.
+Both accept `--directory`; export additionally accepts exact `--provider`, `--model`
+(configured ID), `--api-model`, `--session`, `--run` and `--project` filters.
+`--from` is inclusive and `--to` exclusive, based on recording time; dates accept
+`YYYY-MM-DD` at UTC midnight or UTC ISO timestamps ending in `Z`. No global ordering
+across files is promised. Export preserves ordering within each file.
+
+Exit codes: `0` means structurally readable supported data (known gaps/pending tails
+remain warnings); `1` means corruption, unsupported schema or incomplete records;
+`2` means invalid arguments or access failure. A missing default directory is an
+empty collection. Invalid records are never exported as raw bytes. An active-PID
+partial tail is pending; a live PID does not establish that its writer is healthy.
+
+### Failure behavior
+
+Recording never awaits filesystem work in model/event hooks. The queue is bounded
+to 1,024 events or 1 MiB, including in-flight data; individual records are capped at
+8 KiB. Writes are buffered for up to one second and use no `fsync`. A slow write
+marks degradation after two seconds but remains owned until the syscall settles;
+it cannot trigger overlapping retries. Failed/uncertain batches are not replayed.
+Storage recovery is attempted at most once every 30 seconds. Disposal has a
+two-second budget; an already-issued syscall may settle later without restarting
+collection. Crashes may lose buffered events and health counters.
+
+`journal-degraded` diagnostics identify storage timeout, unavailable policy or disk
+pressure without raw errors. Recovery writes cumulative health counters. If storage
+never recovers, durable failure markers cannot be guaranteed. Warming continues
+when journal storage fails; a completed warming response is not a confirmed cache
+refresh or guaranteed cost saving.
+
 ## Troubleshooting
 
-This checkout's `opencode.json` allows external-directory access to the local
-OpenCode config, log, and state directories for troubleshooting from this project.
-Quit and restart OpenCode to load these permissions.
+The public checkout intentionally does not include a project-level `opencode.json`.
+If you keep an ignored local copy for troubleshooting, it can allow external-directory
+access to the local OpenCode config, log, and state directories. Do not copy broad
+permissions into a shared or public checkout.
 
 Every normal log message starts with **`[session-warming]`**. On this installation,
 OpenCode writes to `~/.local/share/opencode/log/opencode.log` (or the corresponding

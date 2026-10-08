@@ -67,7 +67,7 @@ function finish(observation: Observation, ok: boolean) {
 }
 
 test("options reject invalid, unknown, ineffective and unsafe timer values", () => {
-  assert.deepEqual(settings(), { enabled: true, durationMs: 3600000, debug: false })
+  assert.deepEqual(settings(), { enabled: true, durationMs: 3600000, debug: false, journal: { enabled: true, retentionDays: 365 } })
   for (const options of [{ intervalMs: 0 }, { durationMs: Infinity }, { intervalMs: NaN },
     { durationMs: 2 ** 31 }, { intervalMs: 1.5 }, { intervalMs: 100, durationMs: 100 },
     { enabled: "yes" }, { debug: "yes" }, { interval: "4 minutes" }]) assert.equal(settings(options), undefined)
@@ -291,6 +291,34 @@ test("logs correlate rate limits and expose their next retry time", async () => 
   assert.equal(failed.requestID, "provider-request")
   assert.equal(failed.status, 429)
   assert.equal(failed.nextAttemptAt, 400)
+  h.engine.dispose()
+})
+
+test("every started warm has one terminal event even when a late response invalidates the window", async () => {
+  let resolve!: (response: Response) => void
+  const h = harness((() => new Promise<Response>((done) => { resolve = done })) as typeof fetch, { durationMs: 60000 })
+  h.start()(true)
+  await h.clock.advance(100)
+  const started = h.logs.find((entry) => entry.event === "warm-started")!
+  h.clock.time += 15000
+  resolve(completedResponse())
+  await setImmediate()
+  const terminal = h.logs.filter((entry) => ["warm-completed", "warm-failed", "warm-aborted"].includes(entry.event))
+  assert.equal(terminal.length, 1)
+  assert.equal(terminal[0]!.event, "warm-aborted")
+  assert.equal(terminal[0]!.reason, "clock-gap")
+  assert.equal(terminal[0]!.attemptID, started.attemptID)
+  assert.equal(terminal[0]!.windowID, started.windowID)
+  assert.ok(started.windowID)
+  h.engine.dispose()
+})
+
+test("nonretryable failures finalize before invalidation without a second aborted outcome", async () => {
+  const h = harness((async () => new Response(null, { status: 401 })) as typeof fetch)
+  h.start()(true)
+  await h.clock.advance(100)
+  assert.equal(h.logs.filter((entry) => entry.event === "warm-failed").length, 1)
+  assert.equal(h.logs.filter((entry) => entry.event === "warm-aborted").length, 0)
   h.engine.dispose()
 })
 
