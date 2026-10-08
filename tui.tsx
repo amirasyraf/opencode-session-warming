@@ -7,7 +7,7 @@ import { createDiagnostics, within } from "./diagnostics.ts"
 import { barCells, compactLayout, indicator, remaining, uiOptions } from "./indicator.ts"
 import type { Indicator, UiOptions } from "./indicator.ts"
 import { readStatus } from "./status.ts"
-import type { StatusRead } from "./status.ts"
+import type { StatusRead, UsageStats } from "./status.ts"
 import { isSupportedOpenCodeVersion } from "./compatibility.ts"
 
 function rootSession(api: TuiPluginApi): { id?: string; parent: boolean } {
@@ -61,6 +61,31 @@ function Stat(props: { api: TuiPluginApi; label: string; value: string; warning?
   )
 }
 
+function tokens(value: number): string {
+  if (value < 1000) return String(value)
+  if (value < 1_000_000) return `${(value / 1000).toFixed(value < 10_000 ? 1 : 0)}K`
+  if (value < 1_000_000_000) return `${(value / 1_000_000).toFixed(value < 10_000_000 ? 1 : 0)}M`
+  return `${(value / 1_000_000_000).toFixed(1)}B`
+}
+
+function uncachedInput(usage: UsageStats): number | undefined {
+  if (usage.inputTokens === undefined || usage.cachedTokens === undefined || usage.cacheWriteTokens === undefined) return
+  const value = usage.inputTokens - usage.cachedTokens - usage.cacheWriteTokens
+  return value >= 0 ? value : undefined
+}
+
+function hitRate(usage: UsageStats): string | undefined {
+  if (usage.inputTokens === undefined || usage.cachedTokens === undefined || usage.inputTokens <= 0) return
+  return `${Math.round(usage.cachedTokens / usage.inputTokens * 1000) / 10}%`
+}
+
+function cacheWrite(usage: UsageStats): string | undefined {
+  if (usage.cacheWriteTokens === undefined) return
+  const detail = [usage.cacheWrite5mTokens === undefined ? undefined : `5m ${tokens(usage.cacheWrite5mTokens)}`,
+    usage.cacheWrite1hTokens === undefined ? undefined : `1h ${tokens(usage.cacheWrite1hTokens)}`].filter(Boolean).join(", ")
+  return `${tokens(usage.cacheWriteTokens)}${detail ? ` (${detail})` : ""}`
+}
+
 function View(props: { api: TuiPluginApi; options: UiOptions; sidebar?: boolean; bottom?: boolean }) {
   const dimensions = useTerminalDimensions()
   const [now, setNow] = createSignal(Date.now())
@@ -68,6 +93,10 @@ function View(props: { api: TuiPluginApi; options: UiOptions; sidebar?: boolean;
   const [measured, setMeasured] = createSignal<number>()
   const root = createMemo(() => rootSession(props.api), undefined, { equals: (a, b) => a?.id === b?.id && a?.parent === b?.parent })
   const model = createMemo(() => indicator(status(), now(), props.options))
+  const usage = createMemo(() => {
+    const value = status().status?.usage
+    return value ? { value, uncached: uncachedInput(value), hitRate: hitRate(value), cacheWrite: cacheWrite(value) } : undefined
+  })
   const targetWidth = () => props.bottom ? Math.max(0, dimensions().width - 6) : Math.max(0, Math.min(68, Math.floor((dimensions().width - 8) / 2)))
   const layout = createMemo(() => compactLayout(model(), Math.min(targetWidth(), measured() ?? targetWidth()), root().parent))
   let generation = 0
@@ -122,6 +151,12 @@ function View(props: { api: TuiPluginApi; options: UiOptions; sidebar?: boolean;
         <Show when={model().next}>{(value) => <Stat api={props.api} label="Next request" value={value()} />}</Show>
         <Show when={model().left}>{(value) => <Stat api={props.api} label="Window left" value={value()} />}</Show>
         <Show when={model().completed !== undefined}><Stat api={props.api} label="Requests Sent" value={String(model().completed)} /></Show>
+        <Show when={usage()?.value.inputTokens !== undefined}><Stat api={props.api} label="Input tokens" value={tokens(usage()!.value.inputTokens!)} /></Show>
+        <Show when={usage()?.value.cachedTokens !== undefined}><Stat api={props.api} label="Cache read" value={tokens(usage()!.value.cachedTokens!)} /></Show>
+        <Show when={usage()?.cacheWrite !== undefined}><Stat api={props.api} label="Cache write" value={usage()!.cacheWrite!} /></Show>
+        <Show when={usage()?.uncached !== undefined}><Stat api={props.api} label="Uncached input" value={tokens(usage()!.uncached!)} /></Show>
+        <Show when={usage()?.hitRate !== undefined}><Stat api={props.api} label="Cache hit rate" value={usage()!.hitRate!} /></Show>
+        <Show when={usage()?.value.outputTokens !== undefined}><Stat api={props.api} label="Output tokens" value={tokens(usage()!.value.outputTokens!)} /></Show>
         <Show when={model().failed}><Stat api={props.api} label="Failed" value={String(model().failed)} warning={props.options.color} /></Show>
       </box>
     </Show>

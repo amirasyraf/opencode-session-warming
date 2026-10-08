@@ -170,8 +170,12 @@ hidden, it moves to the prompt row. Child sessions show their root parent's
 status. The UI is an observer; it does not change timers, requests, or history.
 
 The bar shows elapsed time in the current warming window. Adjacent text shows
-state, next request, remaining time, completed requests, and failures. A filled
-bar does not mean that a request was sent or that caching succeeded.
+state, next request, remaining time, completed requests, failures, and, after a
+provider reports usage, warm-request input/output and cache token statistics. The
+sidebar may show cache reads, cache writes, uncached input, and a reported cache
+read ratio. These are cumulative for the current warming window. Missing fields
+are omitted rather than treated as zero. A filled bar or a completed response
+does not prove that a cache refresh succeeded.
 
 TUI options:
 

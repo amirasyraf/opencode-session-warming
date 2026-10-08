@@ -69,6 +69,7 @@ test("interactive v1 renders sidebar progress and responsive fallbacks without p
     const status: WarmStatus = { sessionID: String(session.id), phase: "waiting", startedAt,
       expiresAt: startedAt + 3600000, intervalMs: 240000, durationMs: 3600000,
       nextAttemptAt: Date.now() + 30000, attempted: 3, completed: 3, failed: 0,
+      usage: { inputTokens: 12000, cachedTokens: 9000, cacheWriteTokens: 1000, cacheWrite5mTokens: 600, cacheWrite1hTokens: 400, outputTokens: 120 },
       marks: [4, 8, 12].map((minutes) => ({ at: startedAt + minutes * 60000 + 10, result: "completed" })) }
     publisher.publish(status)
     await publisher.flush()
@@ -105,6 +106,8 @@ test("interactive v1 renders sidebar progress and responsive fallbacks without p
     assert.equal(result.screenReady, true)
     assert.equal(result.inputResponsive, true)
     assert.equal(result.indicatorCompleted, true, `Actual completed count missing\n${result.output}`)
+    assert.equal(result.usageCacheRead, true, "Cache read usage is missing from the sidebar")
+    assert.equal(result.usageCacheWrite, true, "Cache write usage is missing from the sidebar")
     assert.equal(result.indicatorFillOnly, true, `Bar contains visible symbols\n${result.output}`)
     assert.equal(result.indicatorSegmented, true, `15 adjoining interval bands missing\n${result.output}`)
     assert.equal(result.segmentationChanged, true, `Changing interval did not regroup the fixed-width track\n${result.output}`)

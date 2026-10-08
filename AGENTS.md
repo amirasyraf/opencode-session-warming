@@ -129,6 +129,10 @@ store, background daemon, task counter, or conversation reconstruction layer.
   shows state, request counts, failures, and timers. Preserve the cool-left /
   red-right palette, readable monochrome mode, frozen stopped progress, and both
   timers enabled by default.
+- The sidebar may show cumulative provider-reported warm input, output, cache
+  read/write, uncached input, and cache-read ratio values for the current window.
+  Omit missing fields, never turn missing usage into zero, and do not present the
+  ratio or token values as proof of cache refresh or as a dollar-cost estimate.
 - Prefer the sidebar section after LSP. Use the prompt-row fallback when the
   sidebar is hidden, and the bottom-padded fallback for child, permission, and
   question views without a prompt. Never display duplicate indicators.
@@ -163,8 +167,7 @@ When behavior, configuration, support, privacy, or workflow contracts change,
 update both documentation files: explain the user-facing result in `README.md`
 and put the agent-facing constraint in this file. Keep the README readable.
 
-Do not commit, amend, push, deploy, or change credentials unless the user
-explicitly authorizes it. When authorized to publish, stage only intended
-files, inspect the full staged diff, commit in the repository's style, push the
-requested branch, and verify that the local branch and remote match with a
-clean worktree.
+When the user explicitly authorizes a commit, stage only intended
+files, inspect the full staged diff, commit in the repository's style, and
+leave a clean worktree. Do not amend, push, deploy, or change credentials
+unless each action is separately authorized. Never revert unrelated work.

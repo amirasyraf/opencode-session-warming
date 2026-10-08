@@ -36,6 +36,8 @@ initialized = False
 indicator_completed = False
 indicator_sending = False
 indicator_failed = False
+usage_cache_read = False
+usage_cache_write = False
 indicator_fill_only = False
 indicator_segmented = False
 segmentation_changed = False
@@ -159,6 +161,8 @@ try:
                 os.write(master, reply)
         lines, backgrounds = screen(output.decode("utf-8", "replace"))
         text = "\n".join(lines)
+        usage_cache_read = usage_cache_read or "Cache read" in text
+        usage_cache_write = usage_cache_write or "Cache write" in text
         if "Update Available" in text and not dismissed_update:
             os.write(master, b"\x1b")
             dismissed_update = True
@@ -225,6 +229,7 @@ try:
                       "indicatorCompleted": indicator_completed,
                       "indicatorSending": indicator_sending,
                       "indicatorFailed": indicator_failed,
+                      "usageCacheRead": usage_cache_read, "usageCacheWrite": usage_cache_write,
                       "indicatorFillOnly": indicator_fill_only,
                       "indicatorSegmented": indicator_segmented, "segmentationChanged": segmentation_changed,
                       "sidebarPlaced": sidebar_placed, "compactPlaced": compact_placed,

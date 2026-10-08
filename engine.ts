@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { retryAfterMs } from "./protocol.ts"
+import type { Usage } from "./protocol.ts"
 import { abortableFetch, errorDetails } from "./diagnostics.ts"
 import type { Diagnostic } from "./diagnostics.ts"
 import { capture } from "./adapters.ts"
@@ -7,7 +8,7 @@ import type { ModelContext, Replay } from "./adapters.ts"
 import { initialProfile, LEGACY_INTERVAL_MS, resolvePolicy } from "./cache-policy.ts"
 import type { CacheProfile, Settings } from "./cache-policy.ts"
 import type { Observation, Transport } from "./transport.ts"
-import type { Mark, Phase, WarmStatus } from "./status.ts"
+import type { Mark, Phase, UsageStats, WarmStatus } from "./status.ts"
 
 export { settings, settingsError } from "./cache-policy.ts"
 export type { Settings } from "./cache-policy.ts"
@@ -46,7 +47,16 @@ type State = {
   startedAt: number
   completed: number
   failed: number
+  usage?: UsageStats
   marks: Mark[]
+}
+
+const usageFields = ["inputTokens", "cachedTokens", "outputTokens", "cacheWriteTokens", "cacheWrite5mTokens", "cacheWrite1hTokens"] as const
+function addUsage(current: UsageStats | undefined, next: Usage | undefined): UsageStats | undefined {
+  if (!next) return current
+  const usage: UsageStats = { ...current }
+  for (const field of usageFields) if (next[field] !== undefined) usage[field] = (usage[field] ?? 0) + next[field]!
+  return usage
 }
 
 /** No task counters: only ordinary root-model transport activity matters. */
@@ -141,6 +151,7 @@ export class WarmingEngine {
         ttlMs: state.policy.ttlMs, ttlEvidence: state.policy.ttlEvidence, intervalSource: state.policy.intervalSource,
         nextAttemptAt: phase === "waiting" && state.nextAt! < state.expiresAt! ? state.nextAt : undefined,
         attempted: state.warms, completed: state.completed, failed: state.failed, reason,
+        usage: state.usage,
         stoppedAt: phase === "stopped" || phase === "expired" ? this.clock.now() : undefined,
         marks: state.marks.map((mark) => ({ ...mark })) })
     } catch (error) { this.emit({ event: "ui-status-failed", reason: "observer-failed", ...errorDetails(error) }) }
@@ -184,6 +195,7 @@ export class WarmingEngine {
     state.warms = 0
     state.completed = 0
     state.failed = 0
+    state.usage = undefined
     state.marks = []
     state.expiresAt = now + this.config.durationMs
     const result = capture(state.context, url, init)
@@ -311,6 +323,7 @@ export class WarmingEngine {
         const usage = await state.snapshot.drain(response, controller.signal)
         if (!this.clockCurrent(sessionID, state)) return
         succeeded = true
+        state.usage = addUsage(state.usage, usage)
         delay = Math.max(Math.min(state.policy.intervalMs, 1000), startedAt + state.policy.intervalMs - this.clock.now())
         mark.result = "completed"
         if (currentWarm()) state.completed++

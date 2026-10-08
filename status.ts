@@ -7,6 +7,8 @@ import type { Diagnostic } from "./diagnostics.ts"
 
 export type Phase = "preparing" | "generating" | "waiting" | "sending" | "stopped" | "expired"
 export type Mark = { at: number; result: "sending" | "completed" | "failed" | "aborted" }
+export type UsageStats = { inputTokens?: number; cachedTokens?: number; outputTokens?: number; cacheWriteTokens?: number;
+  cacheWrite5mTokens?: number; cacheWrite1hTokens?: number }
 export type WarmStatus = {
   providerID?: string
   model?: string
@@ -25,6 +27,7 @@ export type WarmStatus = {
   attempted: number
   completed: number
   failed: number
+  usage?: UsageStats
   reason?: string
   stoppedAt?: number
   marks: Mark[]
@@ -36,6 +39,14 @@ const MAX_BYTES = 64 * 1024
 const safeID = (value: string) => /^[A-Za-z0-9_-]{1,128}$/.test(value)
 const number = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0
 const object = (value: unknown): value is { [key: string]: unknown } => typeof value === "object" && value !== null && !Array.isArray(value)
+const usageFields = ["inputTokens", "cachedTokens", "outputTokens", "cacheWriteTokens", "cacheWrite5mTokens", "cacheWrite1hTokens"] as const
+
+function safeUsage(value: unknown): UsageStats | undefined {
+  if (!object(value)) return
+  const usage: UsageStats = {}
+  for (const field of usageFields) if (number(value[field])) usage[field] = value[field]
+  return Object.keys(usage).length ? usage : undefined
+}
 
 export function statusDirectory(): string {
   return join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "opencode", "session-warming", "status")
@@ -65,7 +76,7 @@ function safeStatus(value: unknown): WarmStatus | undefined {
     sessionID: value.sessionID, phase: value.phase as Phase, startedAt: value.startedAt as number,
     expiresAt: value.expiresAt as number, intervalMs: value.intervalMs as number, durationMs: value.durationMs as number,
     nextAttemptAt: value.nextAttemptAt as number | undefined, attempted: value.attempted as number,
-    completed: value.completed as number, failed: value.failed as number, marks,
+    completed: value.completed as number, failed: value.failed as number, marks, usage: safeUsage(value.usage),
     stoppedAt: value.stoppedAt as number | undefined,
     reason: typeof value.reason === "string" && /^[a-z0-9-]{1,80}$/.test(value.reason) ? value.reason : undefined,
   }

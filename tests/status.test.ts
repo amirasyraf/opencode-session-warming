@@ -18,12 +18,15 @@ test("metadata IPC is session-isolated, atomic, and never serializes extra reque
   try {
     writer.publish({ ...state("a"), providerID: "github-copilot", model: "gpt-5.6-sol", ttlMs: 1800000,
       ttlEvidence: "upstream-assumed", intervalSource: "model", strategy: "bounded-replay", adapterID: "github-copilot",
+      usage: { inputTokens: 12000, cachedTokens: 9000, cacheWriteTokens: 1000, cacheWrite5mTokens: 500, cacheWrite1hTokens: 500 },
       body: "secret prompt", headers: "Bearer secret" } as WarmStatus)
     writer.publish({ ...state("b"), attempted: 3 })
     await writer.flush()
     assert.equal((await readStatus("a", dir)).status?.attempted, 0)
     assert.equal((await readStatus("a", dir)).status?.ttlEvidence, "upstream-assumed")
     assert.equal((await readStatus("a", dir)).status?.model, "gpt-5.6-sol")
+    assert.deepEqual((await readStatus("a", dir)).status?.usage,
+      { inputTokens: 12000, cachedTokens: 9000, cacheWriteTokens: 1000, cacheWrite5mTokens: 500, cacheWrite1hTokens: 500 })
     assert.equal((await readStatus("b", dir)).status?.attempted, 3)
     const raw = await readFile(join(dir, "a.json"), "utf8")
     assert.equal(raw.includes("secret"), false)

@@ -251,6 +251,21 @@ test("each root has independent timers and completed usage is observable", async
   assert.equal(h.captures.size, 0)
 })
 
+test("status accumulates provider usage and resets it for a new warming window", async () => {
+  let response = 0
+  const h = harness(async () => {
+    response++
+    return completedResponse({ input_tokens: response * 100, input_tokens_details: { cached_tokens: response * 60, cache_write_tokens: response * 10 }, output_tokens: response })
+  })
+  h.start()(true)
+  await h.clock.advance(100)
+  await h.clock.advance(100)
+  assert.deepEqual(h.statuses.at(-1)?.usage, { inputTokens: 300, cachedTokens: 180, cacheWriteTokens: 30, outputTokens: 3 })
+  h.start()
+  assert.equal(h.statuses.at(-1)?.usage, undefined)
+  h.engine.dispose()
+})
+
 test("transport failures and unsupported bodies do not promote a snapshot", async () => {
   const h = harness()
   h.start()(false)
