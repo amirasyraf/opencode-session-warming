@@ -173,7 +173,9 @@ When behavior, configuration, support, privacy, or workflow contracts change,
 update both documentation files: explain the user-facing result in `README.md`
 and put the agent-facing constraint in this file. Keep the README readable.
 
-When the user explicitly authorizes a commit, stage only intended
-files, inspect the full staged diff, commit in the repository's style, and
-leave a clean worktree. Do not amend, push, deploy, or change credentials
-unless each action is separately authorized. Never revert unrelated work.
+For authorized implementation work, stage only intended files, inspect the
+full staged diff, commit in the repository's style, push the current working
+branch, and leave a clean worktree by default. An explicit user request not
+to commit or push overrides this default for that task. Do not amend,
+force-push, deploy, create pull requests, change credentials, or mutate
+unrelated remote state. Never revert unrelated work.
