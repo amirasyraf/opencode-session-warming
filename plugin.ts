@@ -1,4 +1,4 @@
-import type { Plugin } from "@opencode-ai/plugin"
+import type { Hooks, Plugin } from "@opencode-ai/plugin"
 import { WarmingEngine, settings, settingsError } from "./engine.ts"
 import { createDiagnostics, errorDetails, within } from "./diagnostics.ts"
 import type { Diagnostic } from "./diagnostics.ts"
@@ -16,9 +16,14 @@ const context = (input: { model: { providerID: string; api: { id: string } } }):
 
 const hiddenAgents = new Set(["title", "summary"])
 const flag = (name: string) => ["true", "1"].includes(process.env[name] ?? "")
+type ChatInput = Parameters<NonNullable<Hooks["chat.params"]>>[0]
+type Recovery = { revert: string }
+type Preparation = { messageID: string; token?: string; complete: boolean; done: Promise<void> }
+const MAX_RECOVERY = 1024
 
 const plugin: Plugin = async ({ client, project }, options = {}) => {
-  const prepared = new Map<string, { messageID: string; token?: string }>()
+  const prepared = new Map<string, Preparation>()
+  const expired = new Map<string, Recovery>()
   const reverts = new Map<string, string>()
   let journal: Journal | undefined
   const log = createDiagnostics((entry, signal) => client.app.log({ body: entry, signal }), {
@@ -26,8 +31,14 @@ const plugin: Plugin = async ({ client, project }, options = {}) => {
   })
   const diagnostic = (extra: Diagnostic) => {
     if (extra.event === "stopped" && typeof extra.sessionID === "string") {
+      const revert = reverts.get(extra.sessionID)
       prepared.delete(extra.sessionID)
       reverts.delete(extra.sessionID)
+      if (extra.reason === "expired" && revert !== undefined) {
+        expired.delete(extra.sessionID)
+        expired.set(extra.sessionID, { revert })
+        while (expired.size > MAX_RECOVERY) expired.delete(expired.keys().next().value!)
+      } else expired.delete(extra.sessionID)
     }
     journal?.diagnostic(extra)
     log(extra)
@@ -63,26 +74,33 @@ const plugin: Plugin = async ({ client, project }, options = {}) => {
   const clear = (id: string, reason: string) => {
     prepared.delete(id)
     reverts.delete(id)
+    if (reason !== "expired") expired.delete(id)
     engine.invalidate(id, reason)
   }
-  return {
-    "chat.params": async (input) => {
-      if (disposed || hiddenAgents.has(input.agent)) return
-      // Invalidate before awaiting metadata: an unsupported new call still stops old warming.
-      clear(input.sessionID, "ordinary-activity")
-      const observedAt = Date.now()
-      const preparation = { messageID: input.message.id, token: undefined as string | undefined }
-      prepared.set(input.sessionID, preparation)
+  const retryRecovery = (sessionID: string, recovery: Recovery, preparation: Preparation) => {
+    if (prepared.get(sessionID) !== preparation) return
+    prepared.delete(sessionID)
+    expired.delete(sessionID)
+    expired.set(sessionID, recovery)
+  }
+  const prepare = (input: ChatInput, recovery?: Recovery): Preparation => {
+    clear(input.sessionID, "ordinary-activity")
+    const observedAt = Date.now()
+    const preparation = { messageID: input.message.id, token: undefined as string | undefined,
+      complete: false, done: Promise.resolve() }
+    prepared.set(input.sessionID, preparation)
+    preparation.done = (async () => {
       try {
         const result = await within((signal) => client.session.get({ path: { id: input.sessionID }, signal }), 5000, "metadata-timeout")
         if (disposed || prepared.get(input.sessionID) !== preparation) return
         if (!result.data) {
-          prepared.delete(input.sessionID)
+          if (recovery) retryRecovery(input.sessionID, recovery, preparation)
+          else prepared.delete(input.sessionID)
           diagnostic({ event: "skipped", sessionID: input.sessionID, reason: "session-metadata-unavailable", status: result.response?.status })
           return
         }
         ordinary?.classify(input.sessionID, !result.data.parentID)
-        if (result.data.parentID) { prepared.delete(input.sessionID); return }
+        if (result.data.parentID) { prepared.delete(input.sessionID); expired.delete(input.sessionID); return }
         const ordinaryCallID = input.agent === "compaction" ? undefined : ordinary?.call({ sessionID: input.sessionID,
           userMessageID: input.message.id, providerID: input.model.providerID, modelID: input.model.id,
           apiModelID: input.model.api.id, at: observedAt }, result.data.version)
@@ -90,6 +108,7 @@ const plugin: Plugin = async ({ client, project }, options = {}) => {
         const supported = isSupportedOpenCodeVersion(result.data.version) && supportsModel(context(input)) && input.agent !== "compaction"
         if (!supported) {
           prepared.delete(input.sessionID)
+          expired.delete(input.sessionID)
           diagnostic({ event: "skipped", sessionID: input.sessionID, providerID: input.model.providerID,
             configuredModelID: input.model.id, model: input.model.api.id, ordinaryCallID,
             version: result.data.version, reason: !isSupportedOpenCodeVersion(result.data.version) ? "unsupported-session-version" :
@@ -100,20 +119,44 @@ const plugin: Plugin = async ({ client, project }, options = {}) => {
         }
         const token = engine.prepare(input.sessionID, true, context(input), { ordinaryCallID,
           userMessageID: input.message.id, configuredModelID: input.model.id })
-        if (token) {
+        if (token && prepared.get(input.sessionID) === preparation) {
           preparation.token = token
           reverts.set(input.sessionID, JSON.stringify(result.data.revert ?? null))
         }
       } catch (error) {
         if (disposed || prepared.get(input.sessionID) !== preparation) return
-        prepared.delete(input.sessionID)
+        if (recovery) retryRecovery(input.sessionID, recovery, preparation)
+        else prepared.delete(input.sessionID)
         diagnostic({ event: "skipped", sessionID: input.sessionID, reason: "session-metadata-unavailable", ...errorDetails(error) })
+      } finally {
+        preparation.complete = true
       }
+    })()
+    return preparation
+  }
+  return {
+    "chat.params": async (input) => {
+      if (disposed || hiddenAgents.has(input.agent)) return
+      await prepare(input).done
     },
     "chat.headers": async (input, output) => {
       if (disposed || hiddenAgents.has(input.agent) || input.agent === "compaction" || !supportsModel(context(input))) return
-      const request = prepared.get(input.sessionID)
-      if (request?.messageID === input.message.id && request.token) output.headers[CAPTURE_HEADER] = request.token
+      let request = prepared.get(input.sessionID)
+      if (request?.messageID !== input.message.id || !request) {
+        const recovery = expired.get(input.sessionID)
+        if (!recovery) return
+        request = prepare(input, recovery)
+      }
+      if (!request.complete) await request.done
+      if (request.token && !engine.has(input.sessionID)) {
+        const recovery = expired.get(input.sessionID)
+        if (!recovery) return
+        request = prepare(input, recovery)
+        await request.done
+      }
+      if (!disposed && prepared.get(input.sessionID) === request && request.token && engine.has(input.sessionID)) {
+        output.headers[CAPTURE_HEADER] = request.token
+      }
     },
     "experimental.session.compacting": async ({ sessionID }) => { if (!disposed) clear(sessionID, "compacting") },
     event: async ({ event }) => {
@@ -131,11 +174,15 @@ const plugin: Plugin = async ({ client, project }, options = {}) => {
       }
       if (event.type === "session.updated") {
         const info = event.properties.info
-        const before = reverts.get(info.id)
+        const before = reverts.get(info.id) ?? expired.get(info.id)?.revert
         if (before !== undefined && before !== JSON.stringify(info.revert ?? null)) clear(info.id, "reverted")
       }
       if (event.type === "message.updated") {
         const info = event.properties.info
+        if (info.role === "assistant" && info.error?.name === "MessageAbortedError") {
+          clear(info.sessionID, "session-error")
+          return
+        }
         if (info.role === "assistant" && info.time.completed && engine.has(info.sessionID) && !info.summary) {
           diagnostic({ event: "ordinary-usage", sessionID: info.sessionID, inputTokens: info.tokens.input,
             cachedTokens: info.tokens.cache.read, outputTokens: info.tokens.output + info.tokens.reasoning })
@@ -150,6 +197,7 @@ const plugin: Plugin = async ({ client, project }, options = {}) => {
         diagnostic({ event: "ui-status-failed", reason: "cleanup-failed", ...errorDetails(error) })
       })
       prepared.clear()
+      expired.clear()
       reverts.clear()
     },
   }

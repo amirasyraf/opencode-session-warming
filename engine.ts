@@ -91,7 +91,11 @@ export class WarmingEngine {
     this.observer = observer
   }
 
-  has(sessionID: string) { return this.states.has(sessionID) }
+  has(sessionID: string) {
+    const state = this.states.get(sessionID)
+    if (state && state.expiresAt !== undefined && this.clock.now() >= state.expiresAt) this.invalidate(sessionID, "expired")
+    return this.states.has(sessionID)
+  }
 
   recordOrdinaryUsage(sessionID: string, usage: UsageStats) {
     const state = this.states.get(sessionID)

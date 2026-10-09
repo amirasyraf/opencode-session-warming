@@ -135,6 +135,7 @@ not claim a cache hit or a cost saving after a request completes.
    interval, until the fixed window expires.
 5. New ordinary activity, cancellation, compaction, revert, deletion, errors,
    disposal, sleep/resume gaps, and incompatible responses stop the snapshot.
+   A resumed root-model request can establish a fresh window after expiry.
 
 The plugin never sends catch-up bursts after sleep. A fresh ordinary request is
 required to start a new window.

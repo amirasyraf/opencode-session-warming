@@ -109,6 +109,70 @@ test("late session-metadata lookups cannot revive invalidated or newer preparati
   await h.hooks.dispose!()
 })
 
+test("headers recover a root capture after an expired preparation", async () => {
+  const h = await harness(undefined, { intervalMs: 10, durationMs: 40 })
+  const firstHeaders = await h.headers(input("root", "build", "openai", "first"))
+  const [url, init] = ordinary()
+  const firstResponse = await globalThis.fetch(url, { ...init, headers: { ...init.headers, ...firstHeaders } })
+  await firstResponse.text()
+  await sleep(80)
+  assert.ok(h.logs.some((log) => log.event === "stopped" && log.reason === "expired"))
+  const beforeResume = h.logs.length
+
+  const resumed = { headers: {} as Record<string, string> }
+  await h.hooks["chat.headers"]!(input("root", "build", "openai", "resumed"), resumed)
+  assert.ok(resumed.headers[CAPTURE_HEADER])
+  const resumedResponse = await globalThis.fetch(url, { ...init, headers: { ...init.headers, ...resumed.headers } })
+  await resumedResponse.text()
+  await sleep(20)
+  assert.ok(h.logs.filter((log) => log.event === "captured").length >= 2)
+  assert.ok(h.logs.slice(beforeResume).some((log) => log.event === "warm-started"))
+  await h.hooks.dispose!()
+})
+
+test("expired recovery retries transient metadata failures and respects reverts", async () => {
+  let lookups = 0
+  let available = true
+  const h = await harness(async (id) => {
+    if (++lookups > 1 && !available) throw new Error("temporary metadata failure")
+    return { id, version: "1.18.30", revert: { messageID: "original" } }
+  }, { intervalMs: 10, durationMs: 40 })
+  const first = await h.headers(input("root", "build", "openai", "first"))
+  const [url, init] = ordinary()
+  await (await globalThis.fetch(url, { ...init, headers: { ...init.headers, ...first } })).text()
+  await sleep(80)
+
+  available = false
+  const failed = { headers: {} as Record<string, string> }
+  await h.hooks["chat.headers"]!(input("root", "build", "openai", "resumed"), failed)
+  assert.deepEqual(failed.headers, {})
+  available = true
+  const retried = { headers: {} as Record<string, string> }
+  await h.hooks["chat.headers"]!(input("root", "build", "openai", "retried"), retried)
+  assert.ok(retried.headers[CAPTURE_HEADER])
+  await h.hooks.event!({ event: { type: "session.updated", properties: { info: { id: "root", revert: { messageID: "changed" } } } } } as any)
+  const reverted = { headers: {} as Record<string, string> }
+  await h.hooks["chat.headers"]!(input("root", "build", "openai", "after-revert"), reverted)
+  assert.deepEqual(reverted.headers, {})
+  await h.hooks.dispose!()
+})
+
+test("aborted assistant updates clear expired recovery candidates", async () => {
+  const h = await harness(undefined, { intervalMs: 10, durationMs: 40 })
+  const first = await h.headers(input("root", "build", "openai", "first"))
+  const [url, init] = ordinary()
+  await (await globalThis.fetch(url, { ...init, headers: { ...init.headers, ...first } })).text()
+  await sleep(80)
+  await h.hooks.event!({ event: { type: "message.updated", properties: { info: {
+    id: "aborted-assistant", role: "assistant", sessionID: "root", error: { name: "MessageAbortedError" },
+    time: { created: Date.now(), completed: Date.now() },
+  } } } } as any)
+  const resumed = { headers: {} as Record<string, string> }
+  await h.hooks["chat.headers"]!(input("root", "build", "openai", "resumed"), resumed)
+  assert.deepEqual(resumed.headers, {})
+  await h.hooks.dispose!()
+})
+
 test("unsupported transports and invalid options emit no capture hooks", async () => {
   const h = await harness()
   await h.hooks.dispose!()

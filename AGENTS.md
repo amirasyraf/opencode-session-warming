@@ -48,6 +48,10 @@ store, background daemon, task counter, or conversation reconstruction layer.
 - Only root sessions warm. New ordinary root-model activity invalidates old
   warming even when the new provider, model, or request is unsupported.
   Child activity is independent.
+- If a root-model request reaches `chat.headers` without a live matching
+  preparation, the hook may recover preparation from session metadata so a
+  resumed request can start a fresh window after expiry. Never use this path
+  for children, hidden agents, compaction, or unsupported models.
 - Raw transport completion, not `session.busy` or processed stream completion,
   decides when the parent is still generating.
 - Reject stateful references, provider-hosted tools, unimplemented input

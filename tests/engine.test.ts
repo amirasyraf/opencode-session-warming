@@ -174,6 +174,15 @@ test("sleep-resume skips expired windows without catch-up requests", async () =>
   assert.equal(h.engine.has("parent"), false)
 })
 
+test("an overdue expiry is fenced when queried before its timer callback", () => {
+  const h = harness()
+  h.start()(true)
+  h.clock.time = 1000
+  assert.equal(h.engine.has("parent"), false)
+  assert.equal(h.statuses.at(-1)?.phase, "expired")
+  assert.equal(h.captures.size, 0)
+})
+
 test("sleep-resume invalidates a late active window without warming", async () => {
   const h = harness(undefined, { durationMs: 10000 })
   h.start()(true)
