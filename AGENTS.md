@@ -9,6 +9,8 @@ This repository contains two OpenCode v1.18.x plugins:
 
 They load from separate OpenCode config files. `README.md` is for humans: keep
 it short, task-oriented, and free of internal implementation contracts.
+`opencode.jsonc.example` and `tui.json.example` are the versioned configuration
+references; update them when the supported config surface changes.
 This file is for coding agents: put precise invariants and verification rules
 here instead of expanding the README.
 

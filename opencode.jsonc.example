@@ -1,0 +1,21 @@
+{
+  "plugin": [
+    [
+      "file:///absolute/path/to/opencode-session-warming/plugin.ts",
+      {
+        "enabled": true,
+        "durationMs": 3600000,
+        // Optional: "intervalMs": 1680000,
+        "debug": false,
+        "providers": {
+          // Optional provider and exact-model overrides go here.
+        },
+        "journal": {
+          "enabled": true,
+          "retentionDays": 365
+          // Optional: "maxBytes": 134217728
+        }
+      }
+    ]
+  ]
+}

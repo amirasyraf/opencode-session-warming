@@ -33,26 +33,24 @@ The plugin runs directly from the checkout. There is no build step and no
 runtime npm dependency. Use Node 22.18 or newer for the development commands.
 
 1. Clone the repository or use an existing checkout.
-2. From the checkout, print a server-plugin entry with the real file URL:
-
-   ```sh
-   node --input-type=module -e 'import {existsSync} from "node:fs"; import {resolve} from "node:path"; import {pathToFileURL} from "node:url"; const path=resolve("plugin.ts"); if(!existsSync(path)) throw new Error("Run this from the plugin checkout"); console.log(JSON.stringify([pathToFileURL(path).href,{enabled:true,durationMs:3600000}],null,2))'
-   ```
-
-3. Add the printed value to the `plugin` array in
+2. Use `opencode.jsonc.example` as a reference, replace the example file URL
+   with the checkout path, and merge its `plugin` entry into
    `~/.config/opencode/opencode.jsonc`. Keep your existing entries.
-4. To enable the TUI indicator, print its entry:
 
-   ```sh
-   node --input-type=module -e 'import {resolve} from "node:path"; import {pathToFileURL} from "node:url"; console.log(JSON.stringify([pathToFileURL(resolve("tui.tsx")).href,{color:true,showNextTimer:true,showRemainingTimer:true}],null,2))'
-   ```
+3. To enable the TUI indicator, use `tui.json.example` as a reference, replace
+   the example file URL with the checkout path, and merge its `plugin` entry
+   into `~/.config/opencode/tui.json`.
 
-5. Add that value to the `plugin` array in `~/.config/opencode/tui.json`.
-6. Check the version with `opencode --version`, then fully quit and restart
+4. Check the version with `opencode --version`, then fully quit and restart
    OpenCode.
 
 The public repository does not include a project-level `opencode.json`. Your
 local ignored copy can remain in place if you use it for troubleshooting.
+
+The committed `opencode.jsonc.example` and `tui.json.example` files are the
+configuration templates. Compare them after pulling changes; if either file
+changes, review the corresponding local OpenCode config. Do not overwrite your
+local config because it may contain other plugins.
 
 ## Configuration
 

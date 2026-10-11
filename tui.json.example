@@ -1,0 +1,14 @@
+{
+  "plugin": [
+    [
+      "file:///absolute/path/to/opencode-session-warming/tui.tsx",
+      {
+        "enabled": true,
+        "color": true,
+        "showNextTimer": true,
+        "showRemainingTimer": true
+        // Optional: "maxSegments": 15
+      }
+    ]
+  ]
+}
