@@ -39,7 +39,7 @@ function contentReason(value: unknown, fallback: string, images = false): string
       if (images && embeddedImage(part)) continue
       return "unsupported-input-image"
     }
-    if (part.type === "input_file") return "unsupported-input-file"
+    if (part.type === "input_file") continue
     if (part.type === "input_audio") return "unsupported-input-audio"
     return fallback
   }
@@ -91,7 +91,7 @@ function messageContent(value: unknown, role: unknown, nested = false): string |
         typeof source.data === "string" && embeddedImage({ image_url: `data:${source.media_type};base64,${source.data}` })) continue
       return "unsupported-input-image"
     }
-    if (part.type === "document") return "unsupported-input-file"
+    if (part.type === "document") continue
     if (part.type === "audio") return "unsupported-input-audio"
     if (part.type === "tool_use" && role === "assistant" && !nested && typeof part.id === "string" &&
       typeof part.name === "string" && object(part.input)) continue

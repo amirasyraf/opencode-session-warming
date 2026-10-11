@@ -54,11 +54,14 @@ store, background daemon, task counter, or conversation reconstruction layer.
   for children, hidden agents, compaction, or unsupported models.
 - Raw transport completion, not `session.busy` or processed stream completion,
   decides when the parent is still generating.
-- Reject stateful references, provider-hosted tools, unimplemented input
-  types, unsupported media, and request bodies over 16 MiB.
-- Support embedded base64 PNG, JPEG, WebP, and GIF images in user messages and
-  function results without changing the replay prefix. Reject remote and file-ID
-  images, files, and audio. Image bytes count toward the body limit.
+- Reject conversation-state references, provider-hosted tools, unimplemented
+  input types, unsupported media, and request bodies over 16 MiB.
+- Preserve the complete provider input chain, including file attachments, in
+  the replay. Do not strip, reconstruct, or relocate attachment content.
+  Support embedded base64 PNG, JPEG, WebP, and GIF images in user messages and
+  function results without changing the replay prefix. Image and attachment
+  bytes count toward the body limit. Attachment blocks are opaque to the
+  plugin; it does not resolve, upload, or locally validate their sources.
 - Detect SSE from field prefixes even when the media type is missing or wrong.
   Require semantic stream completion; HTTP 200 and EOF alone are insufficient.
 - Keep snapshots and authenticated headers in RAM. Never log their content.
@@ -67,13 +70,15 @@ store, background daemon, task counter, or conversation reconstruction layer.
 
 - Keep provider endpoint and replay policy in the explicit adapter registry.
   Numeric model floors never authorize unknown request features.
-- Preserve unchanged input for native API prewarm and bounded Copilot replay.
+- Preserve the complete captured input chain for every adapter. Native API
+  prewarm and bounded Copilot replay must not strip or reconstruct it.
 - Claude replay retains tool selection, thinking, effort, signatures, cache
   controls, and cache markers. Discard generated local function calls; never
   dispatch them.
 - Skip incompatible explicit thinking budgets instead of changing them.
-- Keep Codex's legacy keepalive isolated. Do not invent a Codex output cap or a
-  gateway prewarm mode.
+- Keep Codex's legacy keepalive isolated: preserve the captured input as a
+  prefix and append only its transient keepalive message. Do not invent a Codex
+  output cap or a gateway prewarm mode.
 - Default GPT-5.6+ refresh is 28 minutes. Claude uses 4 minutes, or 58 minutes
   for exclusively one-hour markers. Mixed TTLs use the shortest selected marker.
 - Resolve settings as model, provider, explicit global, then automatic policy.

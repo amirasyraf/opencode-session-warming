@@ -78,7 +78,6 @@ test("referenced, malformed and unsupported media are rejected with content-free
     { type: "input_image", image_url: "data:image/png;base64,private-invalid-data" },
     { type: "input_image", image_url: "data:image/svg+xml;base64,PHN2Zz4=" },
     { type: "input_image", image_url: "file:///private-image.png" },
-    { type: "input_file", file_data: "private-file-data" },
     { type: "input_audio", data: "private-audio-data" },
   ]) {
     for (const item of [
@@ -94,6 +93,19 @@ test("referenced, malformed and unsupported media are rejected with content-free
   }
 })
 
+test("file attachments remain in the complete replay prefix", () => {
+  const input = [
+    { role: "user", content: [{ type: "input_text", text: "Read this file" },
+      { type: "input_file", filename: "notes.txt", file_data: "data:text/plain;base64,c2VjcmV0" }] },
+    { type: "function_call_output", call_id: "call", output: [{ type: "input_file", file_id: "provider-file" }] },
+  ]
+  const [url, init] = ordinary({ ...requestBody, input })
+  const result = classifyRequest(url, init)
+  assert.ok(result.snapshot)
+  const warm = JSON.parse(warmRequest(result.snapshot, new AbortController().signal).body as string)
+  assert.deepEqual(warm.input.slice(0, -1), input)
+})
+
 test("all supported embedded image MIME types qualify and image bytes count toward the body limit", () => {
   for (const mime of ["png", "jpeg", "webp", "gif"]) {
     const [url, init] = ordinary({ ...requestBody, input: [{ role: "user", content: [
@@ -104,6 +116,9 @@ test("all supported embedded image MIME types qualify and image bytes count towa
   const largeImage = { type: "input_image", image_url: "data:image/png;base64," + "A".repeat(16 * 1024 * 1024) }
   const [url, init] = ordinary({ ...requestBody, input: [{ role: "user", content: [largeImage] }] })
   assert.equal(classifyRequest(url, init).reason, "request-too-large")
+  const largeFile = { type: "input_file", filename: "large.txt", file_data: "data:text/plain;base64," + "A".repeat(16 * 1024 * 1024) }
+  const [fileURL, fileInit] = ordinary({ ...requestBody, input: [{ role: "user", content: [largeFile] }] })
+  assert.equal(classifyRequest(fileURL, fileInit).reason, "request-too-large")
   for (const role of ["system", "developer", "assistant"]) {
     const [url, init] = ordinary({ ...requestBody, input: [{ role, content: [{ type: "input_image", image_url: imageURL }] }] })
     assert.equal(classifyRequest(url, init).reason, "unsupported-input-image")

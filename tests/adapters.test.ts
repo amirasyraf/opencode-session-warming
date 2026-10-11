@@ -14,11 +14,13 @@ const claude = () => ({ model: "claude-sonnet-5", stream: true, max_tokens: 8192
   tools: [{ name: "read", description: "Read a file", input_schema: { type: "object", properties: {} } }],
   tool_choice: { type: "auto" }, thinking: { type: "adaptive", display: "summarized" }, output_config: { effort: "high" },
   messages: [{ role: "user", content: [{ type: "text", text: "Read this screenshot", cache_control: { type: "ephemeral", ttl: "5m" } },
-    { type: "image", source: { type: "base64", media_type: "image/png", data: imageURL.split(",")[1] } }] },
+     { type: "image", source: { type: "base64", media_type: "image/png", data: imageURL.split(",")[1] } },
+     { type: "document", source: { type: "base64", media_type: "application/pdf", data: "JVBERi0xLjQK" } }] },
   { role: "assistant", content: [{ type: "thinking", thinking: "previous reasoning", signature: "fixture-signature" },
     { type: "tool_use", id: "call", name: "read", input: {} }] },
-  { role: "user", content: [{ type: "tool_result", tool_use_id: "call", content: [
-    { type: "text", text: "result" }, { type: "image", source: { type: "base64", media_type: "image/png", data: imageURL.split(",")[1] } }] }] }] })
+   { role: "user", content: [{ type: "tool_result", tool_use_id: "call", content: [
+     { type: "text", text: "result" }, { type: "image", source: { type: "base64", media_type: "image/png", data: imageURL.split(",")[1] } },
+     { type: "document", source: { type: "base64", media_type: "application/pdf", data: "JVBERi0xLjQK" } }] }] }] })
 
 test("numeric model floors admit GPT/Claude target families without substring matches", () => {
   for (const id of ["gpt-5.6", "gpt-5.6-sol", "gpt-5.10", "gpt-6", "gpt-6.1-sol", "gpt-5.6-2026-07-01"]) assert.ok(modernGPT(id), id)
@@ -32,7 +34,8 @@ test("numeric model floors admit GPT/Claude target families without substring ma
 test("public API native prewarm preserves input, tools, reasoning and cache breakpoints", async () => {
   const body = { ...requestBody, model: "gpt-5.6-sol", prompt_cache_options: { ttl: "30m", mode: "implicit" },
     input: [{ role: "user", content: [{ type: "input_image", image_url: imageURL },
-      { type: "input_text", text: "Inspect", prompt_cache_breakpoint: { mode: "explicit" } }] }] }
+      { type: "input_text", text: "Inspect", prompt_cache_breakpoint: { mode: "explicit" } },
+      { type: "input_file", filename: "notes.txt", file_data: "data:text/plain;base64,c2VjcmV0" }] }] }
   const original = init(body)
   const result = capture(context("openai"), "https://api.openai.com/v1/responses", original)
   assert.ok(result.replay)
@@ -50,7 +53,9 @@ test("public API native prewarm preserves input, tools, reasoning and cache brea
 })
 
 test("Copilot GPT keeps the prefix and headers; rejection never escalates to an unbounded strategy", async () => {
-  const body = { ...requestBody, model: "gpt-6.1-sol", max_output_tokens: 50 }
+  const body = { ...requestBody, model: "gpt-6.1-sol", max_output_tokens: 50,
+    input: [{ role: "user", content: [{ type: "input_text", text: "Read this file" },
+      { type: "input_file", file_id: "provider-file" }] }] }
   const original = init(body)
   const result = capture(context("github-copilot", body.model), "https://api.githubcopilot.com/responses", original)
   assert.ok(result.replay)
@@ -118,7 +123,6 @@ test("unsupported Claude shapes fail closed without leaking data", () => {
     [{ container: "secret-state" }, "unsupported-request-field"],
     [{ max_tokens: 0 }, "unsupported-output-limit"],
     [{ messages: [{ role: "user", content: [{ type: "image", source: { type: "url", url: "secret-url" } }] }] }, "unsupported-input-image"],
-    [{ messages: [{ role: "user", content: [{ type: "document", source: { data: "secret" } }] }] }, "unsupported-input-file"],
     [{ cache_control: { type: "ephemeral", ttl: "24h" } }, "unsupported-cache-control"],
   ] as const) {
     const result = capture(context("github-copilot", body.model), "https://api.githubcopilot.com/v1/messages", init({ ...body, ...change }))

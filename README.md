@@ -15,12 +15,12 @@ the computer must stay awake and connected.
 - OpenAI API GPT-5.6+ Responses at `api.openai.com/v1/responses`
 - GitHub Copilot GPT-5.6+ Responses
 - GitHub Copilot Claude Sonnet/Opus 5+ Messages with adaptive or disabled thinking
-- Text, ordinary function tools, and embedded base64 PNG/JPEG/WebP/GIF images
+- Text, ordinary function tools, and the complete provider input chain, including file attachments and embedded base64 PNG/JPEG/WebP/GIF images
 - Root sessions only
 
 The plugin skips other providers, Copilot enterprise/custom endpoints, Chat
 Completions, WebSockets, native LLM execution, provider-managed conversations,
-hosted tools, audio, files, remote images, and unsupported request shapes.
+hosted tools, audio, remote images, and unsupported request shapes.
 Child activity does not reset the root session's timer.
 
 The plugin does not change ordinary authentication, routing, request bytes,
@@ -144,21 +144,27 @@ required to start a new window.
 
 - OpenAI API GPT-5.6+ uses the captured input with native `prewarm: true`,
   `store: false`, and no requested output.
-- Codex uses its legacy transient `OK` instruction. It has no verified output
-  cap on this path.
+- Codex preserves the complete captured input as a prefix, then appends its
+  legacy transient `OK` instruction. It has no verified output cap on this path.
 - Copilot GPT replays the captured input with a maximum of 128 output tokens,
   or the smaller captured limit.
 - Copilot Claude retains messages, system content, tools, cache markers,
   thinking, effort, signatures, and tool selection. Its replay is capped at
   128 output tokens, or the smaller captured limit.
+- Every supported replay preserves the complete captured provider input chain,
+  including file attachments and their placement. Warming controls may change
+  the surrounding request envelope, but the input is not stripped or rebuilt.
 
 Generated local function calls are discarded and never executed. Explicit
 thinking budgets that cannot fit the bounded replay are skipped rather than
 changed. Captured bodies and authenticated headers stay in memory only.
 
 Requests over 16 MiB, stateful conversation references, provider-hosted tools,
-unsupported media, and malformed input are skipped. Embedded image bytes count
-toward the 16 MiB limit.
+unsupported media, and malformed request structures are skipped. Attachment
+blocks are preserved opaquely: the plugin does not inspect, resolve, upload, or
+rewrite their sources, and the provider may reject a later replay if a
+referenced attachment is unavailable. Attachment bytes count toward the 16 MiB
+limit.
 
 OAuth tokens are captured in memory and are not refreshed. A `401` or `403`
 stops that snapshot until a new ordinary request supplies fresh credentials.
