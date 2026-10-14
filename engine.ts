@@ -9,6 +9,7 @@ import { initialProfile, LEGACY_INTERVAL_MS, resolvePolicy } from "./cache-polic
 import type { CacheProfile, Settings } from "./cache-policy.ts"
 import type { Observation, Transport } from "./transport.ts"
 import type { Mark, Phase, UsageStats, WarmStatus } from "./status.ts"
+import type { ControlResult } from "./controls.ts"
 
 export { settings, settingsError } from "./cache-policy.ts"
 export type { Settings } from "./cache-policy.ts"
@@ -71,6 +72,7 @@ function addUsage(current: UsageStats | undefined, next: Usage | undefined): Usa
 /** No task counters: only ordinary root-model transport activity matters. */
 export class WarmingEngine {
   private states = new Map<string, State>()
+  private stopped = new Map<string, number>()
   private disposed = false
   private config: Settings
   private http: Transport
@@ -95,6 +97,64 @@ export class WarmingEngine {
     const state = this.states.get(sessionID)
     if (state && state.expiresAt !== undefined && this.clock.now() >= state.expiresAt) this.invalidate(sessionID, "expired")
     return this.states.has(sessionID)
+  }
+
+  stop(sessionID: string): ControlResult {
+    if (this.disposed) return "unavailable"
+    if (this.stopped.has(sessionID)) return "already-stopped"
+    if (this.stopped.size >= 1024) return "busy"
+    const state = this.states.get(sessionID)
+    if (state) this.clockCurrent(sessionID, state)
+    this.stopped.set(sessionID, this.clock.now())
+    const live = this.states.get(sessionID)
+    if (live) {
+      this.abortWarm(live, "user-stop")
+      this.schedule(sessionID, live)
+      this.notify(sessionID, live, "stopped", "user-stop")
+    } else this.inactive(sessionID, "user-stop")
+    this.emit({ event: "warming-stopped", sessionID, reason: "user-stop", windowID: live?.windowID,
+      ...live?.metadata, providerID: live?.context.providerID, model: live?.context.modelID })
+    return "stopped"
+  }
+
+  startWarming(sessionID: string): ControlResult {
+    if (this.disposed) return "unavailable"
+    if (!this.config.enabled) return "configured-off"
+    const before = this.states.get(sessionID)
+    if (before) this.clockCurrent(sessionID, before)
+    const state = this.states.get(sessionID)
+    const paused = this.stopped.delete(sessionID)
+    if (state && !paused) return "already-started"
+    if (!state || (!state.active && !state.snapshot)) {
+      if (state) this.notify(sessionID, state, "idle", "awaiting-activity")
+      else this.inactive(sessionID, "awaiting-activity")
+      this.emit({ event: "warming-started", sessionID, reason: "user-start" })
+      return "awaiting-activity"
+    }
+    // A user start is the only operation that renews a retained window without ordinary activity.
+    if (state.windowID) this.emit({ event: "window-ended", sessionID, windowID: state.windowID,
+      ...state.metadata, providerID: state.context.providerID, model: state.context.modelID, reason: "user-start" })
+    const now = this.clock.now()
+    state.startedAt = now
+    state.expiresAt = now + this.config.durationMs
+    state.nextAt = now + state.policy.intervalMs
+    state.warms = 0; state.completed = 0; state.failed = 0; state.usage = undefined; state.marks = []
+    if (state.windowID) {
+      state.windowID = randomUUID()
+      this.emit({ event: "window-started", sessionID, windowID: state.windowID, ...state.metadata,
+        providerID: state.context.providerID, model: state.context.modelID, startedAt: now, reason: "user-start" })
+    }
+    this.schedule(sessionID, state)
+    this.notify(sessionID, state, state.active ? "generating" : state.snapshot ? "waiting" : "preparing")
+    this.emit({ event: "warming-started", sessionID, reason: "user-start", windowID: state.windowID,
+      ...state.metadata, providerID: state.context.providerID, model: state.context.modelID })
+    return "started"
+  }
+
+  forget(sessionID: string) {
+    this.stopped.delete(sessionID)
+    if (this.states.has(sessionID)) this.invalidate(sessionID, "deleted")
+    else this.inactive(sessionID, "deleted")
   }
 
   recordOrdinaryUsage(sessionID: string, usage: UsageStats) {
@@ -129,12 +189,7 @@ export class WarmingEngine {
     if (!state) return
     this.states.delete(sessionID)
     if (state.timer !== undefined) this.clock.clear(state.timer)
-    if (state.warm) {
-      const last = state.marks.at(-1)
-      if (last?.result === "sending") last.result = "aborted"
-      state.finishWarm?.({ event: "warm-aborted", reason, retryable: false, errorCategory: "aborted" })
-      state.warm.abort(reason)
-    }
+    this.abortWarm(state, reason)
     if (state.pending) state.pending.complete = undefined
     state.pending = undefined
     state.snapshot = undefined
@@ -146,7 +201,18 @@ export class WarmingEngine {
 
   dispose() {
     this.disposed = true
+    this.stopped.clear()
     for (const id of this.states.keys()) this.invalidate(id, "disposed")
+  }
+
+  private abortWarm(state: State, reason: string) {
+    const controller = state.warm
+    if (!controller) return
+    state.warm = undefined // Fence continuations before abort listeners or a subsequent start can run.
+    const last = state.marks.at(-1)
+    if (last?.result === "sending") last.result = "aborted"
+    state.finishWarm?.({ event: "warm-aborted", reason, retryable: false, errorCategory: "aborted" })
+    controller.abort(reason)
   }
 
   private emit(diagnostic: Diagnostic) {
@@ -158,11 +224,13 @@ export class WarmingEngine {
     this.notify(sessionID, { context, policy: { enabled: false,
       intervalMs: this.config.intervalMs ?? LEGACY_INTERVAL_MS, intervalSource: "automatic", ttlEvidence: "upstream-assumed" },
       token: "", metadata: {}, attempt: 0, warms: 0, active: false, startedAt: this.clock.now(),
-      expiresAt: 0, completed: 0, failed: 0, marks: [] }, "stopped", reason)
+      expiresAt: 0, completed: 0, failed: 0, marks: [] }, reason === "awaiting-activity" ? "idle" : "stopped", reason)
   }
 
   private notify(sessionID: string, state: State, phase: Phase, reason?: string) {
-    if (phase !== "stopped" && phase !== "expired" && !this.current(sessionID, state)) return
+    if (phase !== "stopped" && phase !== "expired" && phase !== "idle" && !this.current(sessionID, state)) return
+    const stoppedAt = this.stopped.get(sessionID)
+    if (stoppedAt !== undefined) { phase = "stopped"; reason = "user-stop" }
     try {
       this.observer?.({ sessionID, phase, startedAt: state.startedAt, expiresAt: state.expiresAt ?? 0,
         intervalMs: state.policy.intervalMs, durationMs: this.config.durationMs,
@@ -172,7 +240,8 @@ export class WarmingEngine {
         nextAttemptAt: phase === "waiting" && state.nextAt! < state.expiresAt! ? state.nextAt : undefined,
         attempted: state.warms, completed: state.completed, failed: state.failed, reason,
         usage: state.usage,
-        stoppedAt: phase === "stopped" || phase === "expired" ? this.clock.now() : undefined,
+        manualStopped: stoppedAt !== undefined,
+        stoppedAt: stoppedAt ?? (phase === "stopped" || phase === "expired" ? this.clock.now() : undefined),
         marks: state.marks.map((mark) => ({ ...mark })) })
     } catch (error) { this.emit({ event: "ui-status-failed", reason: "observer-failed", ...errorDetails(error) }) }
   }
@@ -233,7 +302,7 @@ export class WarmingEngine {
     this.schedule(sessionID, state)
     this.notify(sessionID, state, "generating")
     const observation: Observation = { complete: (ok, failure) => {
-      if (!this.current(sessionID, state) || attempt !== state.attempt) return
+      if (!this.current(sessionID, state) || attempt !== state.attempt || !this.clockCurrent(sessionID, state)) return
       state.pending = undefined
       state.active = false
       if (this.clock.now() >= state.expiresAt!) { this.invalidate(sessionID, "expired"); return }
@@ -267,7 +336,7 @@ export class WarmingEngine {
     const now = this.clock.now()
     const expires = state.expiresAt!
     if (now >= expires) { this.invalidate(sessionID, "expired"); return }
-    const deadline = Math.max(now, state.warm ? Math.min(expires, now + CLOCK_GAP_CHECK_MS) :
+    const deadline = Math.max(now, state.warm || this.stopped.has(sessionID) ? Math.min(expires, now + CLOCK_GAP_CHECK_MS) :
       !state.active && state.snapshot ? Math.min(state.nextAt!, expires) : expires)
     state.wakeAt = deadline
     state.timer = this.clock.set(() => {
@@ -276,7 +345,7 @@ export class WarmingEngine {
       const current = this.clock.now()
       if (current >= expires) { this.invalidate(sessionID, "expired"); return }
       if (current - deadline > CLOCK_GAP_TOLERANCE_MS) { this.invalidate(sessionID, "clock-gap"); return }
-      if (state.warm) { this.schedule(sessionID, state); return }
+      if (state.warm || this.stopped.has(sessionID)) { this.schedule(sessionID, state); return }
       void this.warm(sessionID, state).catch((error: unknown) => {
         this.emit({ event: "internal-error", sessionID, ...errorDetails(error) })
         if (this.current(sessionID, state)) this.invalidate(sessionID, "internal-error")
@@ -285,7 +354,7 @@ export class WarmingEngine {
   }
 
   private async warm(sessionID: string, state: State) {
-    if (!this.current(sessionID, state) || state.active || state.warm || !state.snapshot) return
+    if (!this.current(sessionID, state) || this.stopped.has(sessionID) || state.active || state.warm || !state.snapshot) return
     const controller = new AbortController()
     state.warm = controller
     this.schedule(sessionID, state) // Keep expiry and the clock-gap watchdog active during a warm request.
@@ -322,7 +391,7 @@ export class WarmingEngine {
     this.emit({ event: "warm-started", ...context })
     try {
       const response = await abortableFetch(this.http.fetch, state.snapshot.snapshot.url, state.snapshot.request(controller.signal), controller.signal)
-      if (!this.clockCurrent(sessionID, state)) { void response.body?.cancel().catch(() => {}); return }
+      if (!currentWarm() || !this.clockCurrent(sessionID, state)) { void response.body?.cancel().catch(() => {}); return }
       status = response.status
       requestID = response.headers.get("x-request-id") ?? undefined
       if ([400, 401, 403, 422].includes(response.status)) {
@@ -345,7 +414,7 @@ export class WarmingEngine {
           nextAttemptAt: this.clock.now() + delay < state.expiresAt! ? this.clock.now() + delay : undefined })
       } else {
         const usage = await state.snapshot.drain(response, controller.signal)
-        if (!this.clockCurrent(sessionID, state)) return
+        if (!currentWarm() || !this.clockCurrent(sessionID, state)) return
         succeeded = true
         state.usage = addUsage(state.usage, usage)
         delay = Math.max(Math.min(state.policy.intervalMs, 1000), startedAt + state.policy.intervalMs - this.clock.now())
@@ -358,7 +427,7 @@ export class WarmingEngine {
           cacheWrite1hTokens: usage?.cacheWrite1hTokens, outputLimitReached: usage?.outputLimitReached })
       }
     } catch (error) {
-      this.clockCurrent(sessionID, state)
+      if (currentWarm()) this.clockCurrent(sessionID, state)
       mark.result = controller.signal.aborted ? "aborted" : "failed"
       if (!controller.signal.aborted && currentWarm()) state.failed++
       finish({ event: controller.signal.aborted ? "warm-aborted" : "warm-failed",
@@ -369,7 +438,7 @@ export class WarmingEngine {
         ...(controller.signal.aborted ? { errorCategory: controller.signal.reason === "request-timeout" ? "timeout" : "aborted" } : errorDetails(error)) })
     } finally {
       this.clock.clear(timeout)
-      if (this.clockCurrent(sessionID, state) && state.warm === controller) {
+      if (currentWarm() && this.clockCurrent(sessionID, state)) {
         state.warm = undefined
         state.nextAt = this.clock.now() + delay
         this.emit({ event: "scheduled", ...context, nextAttemptAt: state.nextAt < state.expiresAt! ? state.nextAt : undefined,

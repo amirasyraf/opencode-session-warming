@@ -30,7 +30,8 @@ Keep responsibilities in their current modules:
 - `adapters.ts`: explicit provider endpoints and replay policy.
 - `cache-policy.ts`: model floors, defaults, overrides, and precedence.
 - `engine.ts`: scheduling, invalidation, retries, and warm lifecycle.
-- `status.ts`, `indicator.ts`, `tui.tsx`: read-only UI publication and rendering.
+- `status.ts`, `indicator.ts`, `tui.tsx`: UI publication, observational rendering, and explicit TUI command handling.
+- `controls.ts`: bounded, metadata-only request/acknowledgement envelopes and control delivery.
 - `journal-schema.ts`, `journal.ts`, `journal-reader.ts`, `journal-cli.ts`:
   allowlisted metadata persistence and read-only inspection.
 - `ordinary-observer.ts`: live root usage attribution without history reads.
@@ -101,6 +102,17 @@ store, background daemon, task counter, or conversation reconstruction layer.
   replacement, and late-response paths. This is not exactly-once persistence
   and does not guarantee remote cancellation.
 
+## Session control invariants
+
+- `/warming start`, `/warming stop`, and bare `/warming` execute locally in the TUI. OpenCode 1.18.x native slash actions do not receive arguments; use the high-priority `input.submit` / `prompt.submit` command layer to consume this exact command token before ordinary submission. Invalid arguments stay editable and show usage. Ordinary prompts, other slash commands, shell mode, and dialog inputs fall through unchanged.
+- Rendering remains observational. Only explicit user commands change the engine. Child views target their root parent and label it; the server independently checks root metadata and stable session-version eligibility. Never route controls through `session.command`, `session.prompt`, an agent, or a tool.
+- The control bridge uses namespaced `tui.publish` command events through the existing routed SDK client, not an additional server or filesystem queue. Envelopes allow only action, session ID, request ID, deadline, and an acknowledgement result. Never send editor contents or authenticated snapshots.
+- Require a correlated acknowledgement before success feedback. Client requests expire after five seconds; the server must recheck liveness after asynchronous metadata lookups and before mutation. Order actions per session, bound pending work and deduplication, and fence deletion/disposal. Duplicate request IDs cannot apply an action twice.
+- Manual stop is separate from snapshot validity. Stop aborts warming, retains the snapshot only until its existing expiry, and persists across new ordinary activity in the running instance. Fresh ordinary captures remain admissible while stopped. Deletion and disposal clear the stopped preference; do not silently evict it to enable a session.
+- A manual start of a stopped, live state explicitly opens a new configured-duration window with new window identity and zeroed current-window statistics. Its first warm target is one interval later. Wait for ongoing ordinary transport completion. Starting an already enabled window is a no-op; absent or invalidated captures become enabled/awaiting activity, never reconstructed from history.
+- Expiry, clock gaps, authentication failure, incompatible input, compaction, revert, and other invalidations still release snapshots and pending capture callbacks while manually stopped. Start must not resurrect them or bypass configured policy. Fence warm continuations by controller identity as well as state identity.
+- Status allowlists include manual-stop state and an idle/awaiting-activity phase. Keep stopped progress frozen and next-request timers absent. Record allowlisted user-control events and fresh-window replacements in the journal without deleting historical records.
+
 ## Metadata and journal invariants
 
 - The journal is enabled by default, retains 365 days by default, and has no
@@ -126,9 +138,7 @@ store, background daemon, task counter, or conversation reconstruction layer.
   attribution rather than guessing.
 - Missing usage is unknown. OpenCode-normalized zero is not proof of upstream
   usage. Reported cost has unspecified units, never presumed USD.
-- The UI metadata bridge publishes only allowed times, counters, provider/model,
-  policy identifiers, and outcome marks. It never changes warming, history, or
-  provider requests.
+- The status bridge publishes only allowed times, counters, provider/model, policy identifiers, outcome marks, and manual-stop state. Status publication never changes warming, history, or provider requests; explicit controls use the separate allowlisted command envelopes.
 
 ## Diagnostics and UI invariants
 
@@ -177,8 +187,7 @@ The unit suite uses fake clocks and mock transports. Do not add live provider
 calls to automated tests. `npm run test:runtime` requires an installed stable
 OpenCode 1.18.x release and isolates HOME/XDG directories with a local mock
 provider. It must never use user accounts or global OpenCode configuration.
-`npm run test:tui` requires Python 3 and a PTY; it must not submit prompts or
-contact a live provider.
+`npm run test:tui` requires Python 3 and a PTY; it may submit locally consumed warming commands, but must not submit model prompts or contact a live provider. Control fixtures must verify unchanged conversation history and acknowledged start/stop behavior.
 
 When behavior, configuration, support, privacy, or workflow contracts change,
 update both documentation files: explain the user-facing result in `README.md`

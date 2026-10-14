@@ -3,12 +3,86 @@ import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plug
 import { RGBA } from "@opentui/core"
 import { useTerminalDimensions } from "@opentui/solid"
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js"
+import type { KeyEvent, Renderable, TextareaRenderable } from "@opentui/core"
+import type { CommandContext } from "@opentui/keymap"
 import { createDiagnostics, within } from "./diagnostics.ts"
 import { barCells, compactLayout, indicator, remaining, uiOptions } from "./indicator.ts"
 import type { Indicator, UiOptions } from "./indicator.ts"
 import { readStatus } from "./status.ts"
 import type { StatusRead, UsageStats } from "./status.ts"
 import { isSupportedOpenCodeVersion } from "./compatibility.ts"
+import { ControlClient, parseWarmingCommand } from "./controls.ts"
+import type { ControlAction, ControlResult } from "./controls.ts"
+
+const controlMessages: Record<ControlResult | "unconfirmed", string> = {
+  started: "Warming started with a fresh window.", stopped: "Warming stopped.",
+  "already-started": "Warming is already enabled for this window.", "already-stopped": "Warming is already stopped.",
+  "awaiting-activity": "Warming enabled. Awaiting supported model activity.",
+  "configured-off": "Warming is disabled by configuration.", unavailable: "Warming controls are unavailable.",
+  "not-root": "Warming controls require a root session.", "unsupported-session": "This session's OpenCode version is unsupported.",
+  busy: "Warming controls are busy. Try again shortly.", expired: "The warming control request expired.",
+  unconfirmed: "Warming result not confirmed. Check the indicator before retrying.",
+}
+
+function registerControls(api: TuiPluginApi) {
+  const controls = new ControlClient(async (command, signal) => {
+    const result = await api.client.tui.publish({ body: { type: "tui.command.execute", properties: { command } } }, { signal })
+    if (result.error) throw new Error("control-delivery-failed")
+  })
+  const pending = new Set<string>()
+  let disposed = false
+  const run = async (action: ControlAction, root = rootSession(api)) => {
+    if (!root.id) { api.ui.toast({ message: "Open a session to control warming.", variant: "info" }); return }
+    const sessionID = root.id
+    if (pending.has(sessionID)) { api.ui.toast({ message: "A warming control request is pending.", variant: "info" }); return }
+    pending.add(sessionID)
+    try {
+      const result = await controls.request(action, sessionID)
+      if (!disposed) api.ui.toast({ title: root.parent ? "Parent session warming" : "Warming",
+        message: controlMessages[result], variant: ["started", "stopped", "already-started", "already-stopped", "awaiting-activity"].includes(result) ? "info" : "warning" })
+    } finally { pending.delete(sessionID) }
+  }
+  const menu = async () => {
+    const root = rootSession(api)
+    if (!root.id) { api.ui.toast({ message: "Open a session to control warming.", variant: "info" }); return }
+    const status = await within(() => readStatus(root.id!), 1000, "metadata-timeout").catch(() => ({} as StatusRead))
+    if (disposed || rootSession(api).id !== root.id) return
+    const active = status.status && !status.status.manualStopped && ["preparing", "generating", "waiting", "sending"].includes(status.status.phase) && Date.now() < status.status.expiresAt
+    api.ui.dialog.replace(() => <api.ui.DialogSelect<ControlAction>
+      title={root.parent ? "Parent session warming" : "Session warming"}
+      options={[
+        { title: "Start warming", value: "start", description: "Start a fresh window, or await model activity", disabled: !!active || pending.has(root.id!) },
+        { title: "Stop warming", value: "stop", description: "Keep warming stopped until you start it", disabled: status.status?.manualStopped || pending.has(root.id!) },
+      ]}
+      onSelect={(option) => { api.ui.dialog.clear(); void run(option.value, root) }} />)
+  }
+  const intercept = (context: CommandContext<Renderable, KeyEvent>) => {
+    const editor = api.renderer.currentFocusedEditor as TextareaRenderable | null
+    const traits = editor?.traits as (TextareaRenderable["traits"] & { owner?: string; role?: string }) | undefined
+    if (disposed || !editor || traits?.owner !== "opencode" || traits.role !== "prompt" || traits.status === "SHELL") return false
+    const command = parseWarmingCommand(editor.plainText)
+    if (!command) return false
+    context.event?.preventDefault()
+    context.event?.stopPropagation()
+    if (command === "invalid") {
+      api.ui.toast({ message: "Usage: /warming start or /warming stop", variant: "info" })
+      return
+    }
+    editor.extmarks.clear()
+    editor.clear()
+    if (command === "menu") void menu()
+    else void run(command)
+  }
+  const offCommands = api.keymap.registerLayer({ priority: 100000, commands: [
+    { name: "input.submit", hidden: true, run: intercept },
+    { name: "prompt.submit", hidden: true, run: intercept },
+    { name: "session-warming.menu", namespace: "palette", title: "Session warming", category: "Session", slashName: "warming", run: () => { void menu() } },
+    { name: "session-warming.start", namespace: "palette", title: "Start warming", category: "Session", run: () => { api.ui.dialog.clear(); void run("start") } },
+    { name: "session-warming.stop", namespace: "palette", title: "Stop warming", category: "Session", run: () => { api.ui.dialog.clear(); void run("stop") } },
+  ] })
+  const offEvent = api.event.on("tui.command.execute", (event) => controls.receive(event.properties.command))
+  api.lifecycle.onDispose(() => { disposed = true; offCommands(); offEvent(); controls.dispose(); pending.clear() })
+}
 
 function rootSession(api: TuiPluginApi, sessionID?: string): { id?: string; parent: boolean } {
   const route = api.route.current
@@ -195,6 +269,7 @@ const tui: TuiPlugin = async (api, options = {}) => {
   if (!config.enabled) return
   if (!isSupportedOpenCodeVersion(api.app.version)) { log({ event: "disabled", reason: "unsupported-ui-version" }); return }
   config.color = config.color && process.env.NO_COLOR === undefined
+  registerControls(api)
   const [sidebars, setSidebars] = createSignal(0)
   const Sidebar = () => {
     onMount(() => setSidebars((count) => count + 1))

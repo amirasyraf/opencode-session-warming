@@ -10,6 +10,7 @@ import { supportsModel } from "./adapters.ts"
 import type { ModelContext } from "./adapters.ts"
 import { Journal } from "./journal.ts"
 import { normalizedUsage, OrdinaryObserver } from "./ordinary-observer.ts"
+import { ControlServer } from "./controls.ts"
 
 const context = (input: { model: { providerID: string; api: { id: string } } }): ModelContext =>
   ({ providerID: input.model.providerID, modelID: input.model.api.id })
@@ -75,8 +76,24 @@ const plugin: Plugin = async ({ client, project }, options = {}) => {
     prepared.delete(id)
     reverts.delete(id)
     if (reason !== "expired") expired.delete(id)
-    engine.invalidate(id, reason)
+    if (reason === "deleted") engine.forget(id)
+    else engine.invalidate(id, reason)
   }
+  const controls = new ControlServer(async (request, current) => {
+    const result = await within((signal) => client.session.get({ path: { id: request.sessionID }, signal }),
+      Math.max(1, request.deadlineAt - Date.now()), "metadata-timeout")
+    if (!current()) return "expired"
+    if (!result.data) return "unavailable"
+    if (result.data.parentID) return "not-root"
+    if (!isSupportedOpenCodeVersion(result.data.version)) return "unsupported-session"
+    const before = reverts.get(request.sessionID) ?? expired.get(request.sessionID)?.revert
+    if (before !== undefined && before !== JSON.stringify(result.data.revert ?? null)) clear(request.sessionID, "reverted")
+    if (!current()) return "expired"
+    return request.action === "stop" ? engine.stop(request.sessionID) : engine.startWarming(request.sessionID)
+  }, async (command, signal) => {
+    const result = await client.tui.publish({ body: { type: "tui.command.execute", properties: { command } }, signal })
+    if (result.error) throw new Error("control-delivery-failed")
+  })
   const retryRecovery = (sessionID: string, recovery: Recovery, preparation: Preparation) => {
     if (prepared.get(sessionID) !== preparation) return
     prepared.delete(sessionID)
@@ -161,6 +178,10 @@ const plugin: Plugin = async ({ client, project }, options = {}) => {
     "experimental.session.compacting": async ({ sessionID }) => { if (!disposed) clear(sessionID, "compacting") },
     event: async ({ event }) => {
       if (disposed) return
+      if (event.type === "tui.command.execute") {
+        await controls.receive(event.properties.command)
+        return
+      }
       try { ordinary?.event(event) } catch { if (journal) journal.counters.excludedMetadata++ }
       if (!ordinary && event.type === "message.part.updated" && event.properties.part.type === "step-finish" && engine.has(event.properties.part.sessionID)) {
         const part = event.properties.part
@@ -172,6 +193,7 @@ const plugin: Plugin = async ({ client, project }, options = {}) => {
       }
       if (event.type === "session.compacted") clear(event.properties.sessionID, "compacted")
       if (event.type === "session.deleted") {
+        controls.cancel(event.properties.info.id)
         clear(event.properties.info.id, "deleted")
       }
       if (event.type === "session.updated") {
@@ -194,6 +216,7 @@ const plugin: Plugin = async ({ client, project }, options = {}) => {
     },
     dispose: async () => {
       disposed = true
+      controls.dispose()
       engine.dispose()
       ordinary?.dispose()
       await within(() => Promise.all([publisher.dispose(), journal?.dispose()]), 2000, "metadata-timeout").catch((error: unknown) => {

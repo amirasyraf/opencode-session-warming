@@ -13,6 +13,7 @@ import subprocess
 import sys
 import termios
 import time
+import urllib.request
 
 
 def stop_driver(_signal, _frame):
@@ -51,6 +52,13 @@ no_duplicates = True
 snapshots = {}
 stage = "wide"
 expect_indicator = os.environ.get("WARMING_TUI_EXPECT_INDICATOR") == "1"
+control_stage = "stop"
+control_sent = False
+control_stopped = False
+control_started = False
+control_invalid = False
+control_menu = False
+control_draft = False
 sent = False
 dismissed_update = False
 deadline = time.monotonic() + 45
@@ -134,7 +142,7 @@ try:
                         initialized = True
                 except OSError:
                     pass
-            if initialized and ((not expect_indicator and responsive) or
+            if initialized and ((mode == "controls" and control_draft) or (not mode and not expect_indicator and responsive) or
                                 (mode == "child" and child_placed) or
                                 (mode == "mono" and monochrome) or
                                 (responsive and indicator_completed and indicator_sending and indicator_failed and segmentation_changed and restored_sidebar)):
@@ -161,6 +169,51 @@ try:
                 os.write(master, reply)
         lines, backgrounds = screen(output.decode("utf-8", "replace"))
         text = "\n".join(lines)
+        if mode == "controls":
+            ready = ready or "Build" in text
+            if ready and initialized and not control_sent:
+                os.write(master, b"\x1b[200~/warming stop\x1b[201~")
+                time.sleep(0.1)
+                os.write(master, b"\r")
+                control_sent = True
+            status_path = Path(os.environ["XDG_STATE_HOME"]) / "opencode/session-warming/status" / (sys.argv[3] + ".json")
+            try:
+                current = json.loads(status_path.read_text())["status"]
+            except (OSError, ValueError, KeyError):
+                current = {}
+            if control_stage == "stop" and current.get("manualStopped") and "Warming stopped." in text:
+                control_stopped = True
+                control_stage = "start"
+                os.write(master, b"\x1b[200~/warming start\x1b[201~")
+                time.sleep(0.1)
+                os.write(master, b"\r")
+            elif control_stage == "start" and current.get("phase") == "idle" and "Warming enabled." in text and "Awaiting" in text:
+                control_started = True
+                control_stage = "invalid"
+                os.write(master, b"\x1b[200~/warming invalid\x1b[201~")
+                time.sleep(0.1)
+                os.write(master, b"\r")
+            elif control_stage == "invalid" and "Usage: /warming start or /warming stop" in text and "/warming invalid" in text:
+                control_invalid = True
+                control_stage = "menu"
+                body = json.dumps({"type": "tui.command.execute", "properties": {"command": "prompt.clear"}}).encode()
+                request = urllib.request.Request(sys.argv[2] + "/tui/publish", data=body,
+                                                 headers={"content-type": "application/json", "x-opencode-directory": sys.argv[1]})
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    response.read()
+                time.sleep(0.2)
+                os.write(master, b"\x1b[200~/warming \x1b[201~")
+                time.sleep(0.1)
+                os.write(master, b"\r")
+            elif control_stage == "menu" and "Session warming" in text and "Start warming" in text and "Stop warming" in text:
+                control_menu = True
+                control_stage = "draft"
+                os.write(master, b"\x1b")
+                time.sleep(0.2)
+                os.write(master, b"\x1b[200~warming-smoke\x1b[201~")
+            elif control_stage == "draft" and "warming-smoke" in text:
+                control_draft = True
+            continue
         usage_cache_read = usage_cache_read or "Cache Read" in text
         usage_cache_write = usage_cache_write or "Cache Write" in text
         if "Update Available" in text and not dismissed_update:
@@ -225,6 +278,8 @@ try:
             stage = "restore"
             resize(150)
     print(json.dumps({"screenReady": ready, "inputResponsive": responsive,
+                      "controlStopped": control_stopped, "controlStarted": control_started,
+                      "controlInvalid": control_invalid, "controlMenu": control_menu, "controlDraft": control_draft,
                       "initialized": initialized,
                       "indicatorCompleted": indicator_completed,
                       "indicatorSending": indicator_sending,
@@ -237,7 +292,7 @@ try:
                       "childPlaced": child_placed, "monochrome": monochrome,
                       "noDuplicates": no_duplicates, "snapshots": snapshots,
                       "output": history.decode("utf-8", "replace")[-16000:]}))
-    sys.exit(0 if responsive or child_placed or monochrome else 1)
+    sys.exit(0 if responsive or child_placed or monochrome or control_draft else 1)
 finally:
     if child.poll() is None:
         os.killpg(child.pid, signal.SIGTERM)

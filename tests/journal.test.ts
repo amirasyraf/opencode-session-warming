@@ -67,6 +67,24 @@ test("journal rotates private segments, preserves history on shutdown, and recor
   } finally { await journal.dispose(); await rm(root, { recursive: true, force: true }) }
 })
 
+test("manual controls and renewed windows retain earlier journal history without snapshot data", async () => {
+  const root = await mkdtemp(join(tmpdir(), "warming-journal-controls-"))
+  const journal = new Journal(options, () => {}, { directory: root })
+  try {
+    journal.diagnostic({ event: "window-started", sessionID: "root", windowID: "original" })
+    journal.diagnostic({ event: "warming-stopped", sessionID: "root", windowID: "original", reason: "user-stop", snapshot: "secret" })
+    journal.diagnostic({ event: "window-ended", sessionID: "root", windowID: "original", reason: "user-start" })
+    journal.diagnostic({ event: "window-started", sessionID: "root", windowID: "fresh", reason: "user-start" })
+    journal.diagnostic({ event: "warming-started", sessionID: "root", windowID: "fresh", reason: "user-start", authorization: "secret" })
+    await journal.dispose()
+    const data = await records(root)
+    assert.equal(data.filter((item) => item.event === "window.started").length, 2)
+    assert.equal(data.find((item) => item.event === "warming.user-stopped")?.reason, "user-stop")
+    assert.equal(data.find((item) => item.event === "warming.user-started")?.windowID, "fresh")
+    assert.equal(JSON.stringify(data).includes("secret"), false)
+  } finally { await journal.dispose(); await rm(root, { recursive: true, force: true }) }
+})
+
 test("the newest startup controls retroactive retention while fresh and damaged history survives", async () => {
   const root = await mkdtemp(join(tmpdir(), "warming-journal-"))
   const old = await fixture(root, Date.now() - 10 * DAY_MS)

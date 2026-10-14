@@ -20,7 +20,7 @@ test("metadata IPC is session-isolated, atomic, and never serializes extra reque
       ttlEvidence: "upstream-assumed", intervalSource: "model", strategy: "bounded-replay", adapterID: "github-copilot",
       usage: { inputTokens: 12000, cachedTokens: 9000, cacheWriteTokens: 1000, cacheWrite5mTokens: 500, cacheWrite1hTokens: 500 },
       body: "secret prompt", headers: "Bearer secret" } as WarmStatus)
-    writer.publish({ ...state("b"), attempted: 3 })
+    writer.publish({ ...state("b"), attempted: 3, phase: "stopped", manualStopped: true, reason: "user-stop", stoppedAt: Date.now() })
     await writer.flush()
     assert.equal((await readStatus("a", dir)).status?.attempted, 0)
     assert.equal((await readStatus("a", dir)).status?.ttlEvidence, "upstream-assumed")
@@ -28,6 +28,10 @@ test("metadata IPC is session-isolated, atomic, and never serializes extra reque
     assert.deepEqual((await readStatus("a", dir)).status?.usage,
       { inputTokens: 12000, cachedTokens: 9000, cacheWriteTokens: 1000, cacheWrite5mTokens: 500, cacheWrite1hTokens: 500 })
     assert.equal((await readStatus("b", dir)).status?.attempted, 3)
+    assert.equal((await readStatus("b", dir)).status?.manualStopped, true)
+    writer.publish({ ...state("idle"), phase: "idle", expiresAt: 0, manualStopped: false, reason: "awaiting-activity" })
+    await writer.flush()
+    assert.equal((await readStatus("idle", dir)).status?.phase, "idle")
     const raw = await readFile(join(dir, "a.json"), "utf8")
     assert.equal(raw.includes("secret"), false)
     writer.publish({ ...state("a"), attempted: 1 })

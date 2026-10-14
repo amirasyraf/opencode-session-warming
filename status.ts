@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { errorDetails } from "./diagnostics.ts"
 import type { Diagnostic } from "./diagnostics.ts"
 
-export type Phase = "preparing" | "generating" | "waiting" | "sending" | "stopped" | "expired"
+export type Phase = "idle" | "preparing" | "generating" | "waiting" | "sending" | "stopped" | "expired"
 export type Mark = { at: number; result: "sending" | "completed" | "failed" | "aborted" }
 export type UsageStats = { inputTokens?: number; uncachedInputTokens?: number; cachedTokens?: number; outputTokens?: number; cacheWriteTokens?: number;
   cacheWrite5mTokens?: number; cacheWrite1hTokens?: number }
@@ -30,6 +30,7 @@ export type WarmStatus = {
   usage?: UsageStats
   reason?: string
   stoppedAt?: number
+  manualStopped?: boolean
   marks: Mark[]
 }
 type Record = { schema: 1; owner: string; pid: number; heartbeatAt: number; status: WarmStatus }
@@ -55,7 +56,7 @@ export function statusDirectory(): string {
 /** Reconstruct only allowed metadata fields; snapshots, headers, prompts, and errors never enter IPC. */
 function safeStatus(value: unknown): WarmStatus | undefined {
   if (!object(value) || typeof value.sessionID !== "string" || !safeID(value.sessionID) ||
-      !["preparing", "generating", "waiting", "sending", "stopped", "expired"].includes(String(value.phase)) ||
+      !["idle", "preparing", "generating", "waiting", "sending", "stopped", "expired"].includes(String(value.phase)) ||
       ![value.startedAt, value.expiresAt, value.intervalMs, value.durationMs, value.attempted, value.completed, value.failed].every(number) ||
       !value.intervalMs || !value.durationMs || (value.nextAttemptAt !== undefined && !number(value.nextAttemptAt)) ||
       (value.stoppedAt !== undefined && !number(value.stoppedAt)) ||
@@ -78,6 +79,7 @@ function safeStatus(value: unknown): WarmStatus | undefined {
     nextAttemptAt: value.nextAttemptAt as number | undefined, attempted: value.attempted as number,
     completed: value.completed as number, failed: value.failed as number, marks, usage: safeUsage(value.usage),
     stoppedAt: value.stoppedAt as number | undefined,
+    manualStopped: typeof value.manualStopped === "boolean" ? value.manualStopped : undefined,
     reason: typeof value.reason === "string" && /^[a-z0-9-]{1,80}$/.test(value.reason) ? value.reason : undefined,
   }
 }
@@ -133,7 +135,7 @@ export class StatusPublisher {
     if (!this.timer) {
       this.timer = setInterval(() => {
         for (const [id, entry] of this.states) {
-          if ((entry.status.phase === "stopped" || entry.status.phase === "expired") && Date.now() - entry.changedAt > RETENTION_MS) {
+          if (!entry.status.manualStopped && (entry.status.phase === "idle" || entry.status.phase === "stopped" || entry.status.phase === "expired") && Date.now() - entry.changedAt > RETENTION_MS) {
             this.states.delete(id)
             this.pending.delete(id)
             void this.removeOwned(id)

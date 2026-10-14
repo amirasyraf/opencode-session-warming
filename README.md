@@ -2,7 +2,7 @@
 
 An OpenCode v1.18.x plugin that keeps supported root-session prompt prefixes
 warm while OpenCode is waiting on a foreground subagent or long-running tool.
-It also adds a read-only warming indicator to the TUI.
+It also adds a warming indicator and session controls to the TUI.
 
 Warming sends extra provider requests. They use quota and may cost money.
 Cache retention and savings are not guaranteed. OpenCode must stay running and
@@ -73,7 +73,7 @@ journal for 365 days.
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | `enabled` | `true` | Enable the server plugin. |
-| `durationMs` | `3600000` | Maximum warming window after ordinary activity. |
+| `durationMs` | `3600000` | Warming window after ordinary activity or a manual start. |
 | `intervalMs` | automatic | Global refresh interval override. |
 | `providers` | none | Provider and exact model overrides. |
 | `debug` | `false` | Add scheduling details to OpenCode logs. |
@@ -137,8 +137,25 @@ not claim a cache hit or a cost saving after a request completes.
    disposal, sleep/resume gaps, and incompatible responses stop the snapshot.
    A resumed root-model request can establish a fresh window after expiry.
 
-The plugin never sends catch-up bursts after sleep. A fresh ordinary request is
-required to start a new window.
+The plugin never sends catch-up bursts after sleep. Once a snapshot expires or is invalidated, a fresh ordinary request is required to capture a replayable input again.
+
+## Session controls
+
+With both plugins enabled, use these commands in a session:
+
+| Command | Effect |
+| --- | --- |
+| `/warming stop` | Abort the current warm request and keep warming stopped until you start it. |
+| `/warming start` | Start a fresh window using the latest valid snapshot, or wait for supported model activity. |
+| `/warming` | Open the warming action menu. |
+
+The command palette also has **Start warming** and **Stop warming** actions. In a child view, they control its root parent and label the feedback accordingly. Commands execute directly without creating an assistant turn or writing session history.
+
+Ordinary requests continue while warming is stopped and can supply a newer snapshot. The retained snapshot stays in RAM only until its existing expiry. Starting resets current-window statistics and progress, then schedules the first warm request one interval later. It waits for any ongoing ordinary response to finish. Starting an already enabled window does nothing.
+
+Start cannot recover an expired or invalidated snapshot, bypass configuration, or refresh credentials. When no valid snapshot remains, the indicator shows **Awaiting activity** until a supported ordinary request arrives. Stop lasts for the running server instance; restarting OpenCode clears it. Resetting window statistics does not delete journal history.
+
+Success feedback requires a server acknowledgement. If the result is not confirmed, check the indicator before retrying. Fully quit and restart OpenCode after updating the plugin to load the commands.
 
 ## Replay behavior and limits
 
@@ -173,12 +190,11 @@ Aborting locally does not guarantee immediate remote cancellation.
 ## TUI indicator
 
 When enabled, the indicator appears after LSP in the sidebar. If the sidebar is
-hidden, it moves to the prompt row. Child sessions show their root parent's
-status. The UI is an observer; it does not change timers, requests, or history.
+hidden, it moves to the prompt row. Child sessions show their root parent's status. Rendering only observes warming; the session commands explicitly control it.
 
 The bar shows elapsed time in the current warming window. Adjacent text shows
 state, next request, remaining time, completed requests, failures, and, after a
-provider reports usage, warm-request input/output and cache token statistics. The
+provider reports usage, warm-request input/output and cache token statistics.
 The sidebar keeps supported stat rows stable while status is available. It shows
 cache reads, cache writes, a reported cache-read ratio, and output tokens from
 admitted ordinary root steps and warm requests. Values appear as soon as an
@@ -191,7 +207,7 @@ TUI options:
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `enabled` | `true` | Show the indicator. |
+| `enabled` | `true` | Enable the indicator and session commands. |
 | `color` | `true` | Use the cool-to-red palette. `NO_COLOR` disables it. |
 | `maxSegments` | automatic | Limit visible colour bands. |
 | `showNextTimer` | `true` | Show the next-request countdown. |

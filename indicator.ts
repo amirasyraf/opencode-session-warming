@@ -34,6 +34,7 @@ function stoppedReason(status: WarmStatus): string {
   if (status.reason === "session-error") return "Cancelled/error"
   if (status.reason === "ordinary-activity") return "New model activity"
   if (status.reason === "clock-gap") return "Resumed late"
+  if (status.reason === "user-stop") return "By user"
   return (status.reason ?? "inactive").replaceAll("-", " ")
 }
 
@@ -45,16 +46,16 @@ export function indicator(read: StatusRead, now: number,
     detail: read.unavailable ? `Status ${read.unavailable.replaceAll("-", " ")}` : "Awaiting model activity" }
   const status = read.status
   const stopped = status.phase === "stopped"
-  const expired = !stopped && (status.phase === "expired" || now >= status.expiresAt)
-  const hasWindow = status.expiresAt > status.startedAt
+  const expired = !stopped && status.phase !== "idle" && (status.phase === "expired" || now >= status.expiresAt)
+  const hasWindow = status.phase !== "idle" && status.expiresAt > status.startedAt
   const elapsed = Math.max(0, Math.min(now, status.stoppedAt ?? now) - status.startedAt)
   const progress = hasWindow ? Math.min(1, elapsed / status.durationMs) : 0
   const state = stopped ? "Stopped" : expired ? "Expired" : {
-    preparing: "Preparing", generating: "Model active", waiting: status.nextAttemptAt ? "Waiting" : "Window ending",
+    idle: "Awaiting activity", preparing: "Preparing", generating: "Model active", waiting: status.nextAttemptAt ? "Waiting" : "Window ending",
     sending: "Sending", stopped: "Stopped", expired: "Expired",
   }[status.phase]
   return {
-    state, detail: stopped ? stoppedReason(status) : undefined, progress, hasWindow, dimmed: stopped || expired,
+    state, detail: stopped ? stoppedReason(status) : status.phase === "idle" ? "Awaiting model activity" : undefined, progress, hasWindow, dimmed: stopped || expired,
     completed: status.completed, failed: status.failed, timerWidth: remaining(status.durationMs).length,
     durationMs: status.durationMs, intervalMs: status.intervalMs,
     next: !stopped && !expired && status.phase === "waiting" && status.nextAttemptAt !== undefined && timers.showNextTimer !== false

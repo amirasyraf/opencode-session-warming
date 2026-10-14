@@ -447,3 +447,161 @@ test("engine publishes actual request progress, resets on ordinary activity and 
   assert.equal(h.statuses.at(-1)?.phase, "expired")
   h.engine.dispose()
 })
+
+test("user stop preserves a replay and start creates one fresh window without catch-up sends", async () => {
+  const h = harness()
+  h.start()(true)
+  await h.clock.advance(100)
+  const oldWindow = h.logs.find((entry) => entry.event === "window-started")?.windowID
+  assert.equal(h.engine.stop("parent"), "stopped")
+  const frozen = h.statuses.at(-1)!
+  assert.equal(frozen.phase, "stopped")
+  assert.equal(frozen.reason, "user-stop")
+  assert.equal(frozen.manualStopped, true)
+  assert.equal(frozen.nextAttemptAt, undefined)
+  assert.equal(h.engine.stop("parent"), "already-stopped")
+  await h.clock.advance(300)
+  assert.equal(h.requests.length, 1)
+  assert.equal(h.engine.startWarming("parent"), "started")
+  const fresh = h.statuses.at(-1)!
+  assert.equal(fresh.startedAt, 400)
+  assert.equal(fresh.expiresAt, 1400)
+  assert.equal(fresh.completed, 0)
+  assert.equal(fresh.usage, undefined)
+  assert.equal(fresh.manualStopped, false)
+  assert.notEqual(h.logs.filter((entry) => entry.event === "window-started").at(-1)?.windowID, oldWindow)
+  assert.equal(h.engine.startWarming("parent"), "already-started")
+  assert.equal(h.statuses.at(-1)?.expiresAt, 1400)
+  await h.clock.advance(99)
+  assert.equal(h.requests.length, 1)
+  await h.clock.advance(1)
+  assert.equal(h.requests.length, 2)
+  h.engine.dispose()
+})
+
+test("user stop survives new ordinary activity and captures the latest complete input", async () => {
+  const h = harness()
+  h.start()(true)
+  h.engine.stop("parent")
+  const token = h.engine.prepare("parent", true)!
+  const updated = ordinary({ ...JSON.parse(ordinary()[1].body as string), input: [{ role: "user", content: "Latest input" }] })
+  finish(h.captures.get(token)!(...updated)!, true)
+  await h.clock.advance(300)
+  assert.equal(h.requests.length, 0)
+  assert.equal(h.statuses.at(-1)?.manualStopped, true)
+  h.engine.startWarming("parent")
+  await h.clock.advance(100)
+  const input = JSON.parse(h.requests.at(-1)!.body as string).input
+  assert.equal(input[0].content, "Latest input")
+  h.engine.dispose()
+})
+
+test("stop and start during preparation or ordinary generation never cancel or overlap ordinary traffic", async () => {
+  for (const stage of ["preparation", "generation"] as const) {
+    const h = harness()
+    const token = h.engine.prepare("parent", true)!
+    const observation = stage === "generation" ? h.captures.get(token)!(...ordinary())! : undefined
+    h.engine.stop("parent")
+    assert.equal(h.engine.startWarming("parent"), stage === "generation" ? "started" : "awaiting-activity")
+    await h.clock.advance(100)
+    assert.equal(h.requests.length, 0)
+    const pending = observation ?? h.captures.get(token)!(...ordinary())!
+    assert.ok(pending.complete)
+    finish(pending, true)
+    await h.clock.advance(stage === "generation" ? 0 : 100)
+    assert.equal(h.requests.length, 1)
+    h.engine.dispose()
+  }
+})
+
+test("stop aborts an in-flight warm exactly once and late completion cannot corrupt a restarted window", async () => {
+  let signal!: AbortSignal
+  let complete!: () => void
+  const h = harness((async (_url, init) => {
+    signal = init!.signal!
+    return new Response(new ReadableStream({ start(controller) {
+      complete = () => {
+        controller.enqueue(new TextEncoder().encode('data: {"type":"response.completed","response":{"usage":{"input_tokens":999}}}\n\n'))
+        controller.close()
+      }
+    } }), { headers: { "content-type": "text/event-stream" } })
+  }) as typeof fetch)
+  h.start()(true)
+  await h.clock.advance(100)
+  complete() // Queue stream completion before stop; its continuation must not update the fresh window.
+  h.engine.stop("parent")
+  assert.equal(signal.aborted, true)
+  h.engine.startWarming("parent")
+  await setImmediate()
+  assert.equal(h.statuses.at(-1)?.usage, undefined)
+  assert.equal(h.statuses.at(-1)?.completed, 0)
+  assert.equal(h.statuses.at(-1)?.nextAttemptAt, 200)
+  assert.equal(h.logs.filter((entry) => entry.event === "warm-aborted").length, 1)
+  assert.equal(h.logs.filter((entry) => entry.event === "warm-completed").length, 0)
+  h.engine.dispose()
+})
+
+test("start cannot resurrect expired, invalidated or clock-gap snapshots; deletion forgets manual stop", async () => {
+  for (const reason of ["expired", "clock-gap", "reverted", "compacted", "http-401"] as const) {
+    const h = harness(undefined, { durationMs: 60000 })
+    h.start()(true)
+    h.engine.stop("parent")
+    if (reason === "expired") h.clock.time = 60000
+    else if (reason === "clock-gap") h.clock.time = 11000
+    else h.engine.invalidate("parent", reason)
+    assert.equal(h.engine.startWarming("parent"), "awaiting-activity", reason)
+    assert.equal(h.captures.size, 0, reason)
+    await h.clock.advance(100)
+    assert.equal(h.requests.length, 0, reason)
+    assert.equal(h.statuses.at(-1)?.phase, "idle")
+    h.engine.dispose()
+  }
+  const h = harness()
+  h.engine.stop("parent")
+  h.engine.forget("parent")
+  h.start()(true)
+  await h.clock.advance(100)
+  assert.equal(h.requests.length, 1)
+  h.engine.dispose()
+})
+
+test("stopped snapshot expiry still releases capture callbacks and leaves the session manually stopped", async () => {
+  const h = harness()
+  const done = h.start()
+  h.engine.stop("parent")
+  await h.clock.advance(1000)
+  done(true)
+  assert.equal(h.engine.has("parent"), false)
+  assert.equal(h.captures.size, 0)
+  assert.equal(h.statuses.at(-1)?.manualStopped, true)
+  h.start()(true)
+  await h.clock.advance(100)
+  assert.equal(h.requests.length, 0)
+  h.engine.dispose()
+})
+
+test("manual start never bypasses disabled provider policy or restores a failed capture", () => {
+  const h = harness(undefined, { providers: { openai: { enabled: false } } })
+  h.engine.stop("parent")
+  assert.equal(h.engine.prepare("parent", true), undefined)
+  assert.equal(h.engine.startWarming("parent"), "awaiting-activity")
+  assert.equal(h.engine.prepare("parent", true), undefined)
+  assert.equal(h.captures.size, 0)
+  h.engine.dispose()
+  const failed = harness()
+  failed.start()(false)
+  failed.engine.stop("parent")
+  assert.equal(failed.engine.startWarming("parent"), "awaiting-activity")
+  assert.equal(failed.statuses.at(-1)?.phase, "idle")
+  failed.engine.dispose()
+})
+
+test("stopped preferences are bounded without silently re-enabling older sessions", () => {
+  const h = harness()
+  for (let index = 0; index < 1024; index++) assert.equal(h.engine.stop(`root-${index}`), "stopped")
+  assert.equal(h.engine.stop("excess"), "busy")
+  assert.equal(h.engine.stop("root-0"), "already-stopped")
+  h.engine.forget("root-0")
+  assert.equal(h.engine.stop("excess"), "stopped")
+  h.engine.dispose()
+})

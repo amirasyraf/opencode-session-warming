@@ -9,6 +9,8 @@ import plugin from "../plugin.ts"
 import { CAPTURE_HEADER } from "../protocol.ts"
 import { completedResponse, ordinary } from "./helpers.ts"
 import { readSegment, segmentFiles } from "../journal-reader.ts"
+import { ControlClient } from "../controls.ts"
+import { readStatus } from "../status.ts"
 
 const stateHome = await mkdtemp(join(tmpdir(), "warming-plugin-unit-"))
 const previousStateHome = process.env.XDG_STATE_HOME
@@ -30,20 +32,23 @@ globalThis.fetch = (async (_url, init) => { wire.push(init!); return completedRe
 
 async function harness(get?: (id: string) => Promise<unknown>, overrides: Record<string, unknown> = {}) {
   const logs: Record<string, unknown>[] = []
+  let controls: ControlClient | undefined
   const client = {
     session: { get: async ({ path }: { path: { id: string } }) => ({ data: get ? await get(path.id) : {
       id: path.id, version: "1.18.30", parentID: path.id === "child" ? "root" : undefined,
     } }) },
     app: { log: async ({ body }: { body: { extra: Record<string, unknown> } }) => { logs.push(body.extra) } },
+    tui: { publish: async ({ body }: { body: { properties: { command: string } } }) => { controls?.receive(body.properties.command); return { data: true } } },
   }
   const hooks = await plugin({ client } as unknown as PluginInput, { intervalMs: 60000, durationMs: 120000, debug: true, ...overrides })
+  controls = new ControlClient(async (command) => { await hooks.event!({ event: { type: "tui.command.execute", properties: { command } } }) })
   async function headers(value = input()) {
     await hooks["chat.params"]!(value, params)
     const out = { headers: {} as Record<string, string> }
     await hooks["chat.headers"]!(value, out)
     return out.headers
   }
-  return { hooks, headers, logs }
+  return { hooks, headers, logs, control: (action: "start" | "stop", sessionID = "root") => controls!.request(action, sessionID) }
 }
 
 test("root capture follows OAuth routing, excludes children/hidden calls and preserves ordinary parameters", async () => {
@@ -286,5 +291,83 @@ test("Copilot target models are marked; switching to older/other models invalida
     assert.deepEqual(await h.headers(value), {})
   }
   assert.ok(h.logs.some((entry) => entry.reason === "unsupported-model"))
+  await h.hooks.dispose!()
+})
+
+test("session controls stop captures without clearing preparation and restart a retained snapshot", async () => {
+  const h = await harness(undefined, { intervalMs: 100, durationMs: 2000 })
+  const headers = await h.headers()
+  const [url, init] = ordinary()
+  await (await globalThis.fetch(url, { ...init, headers: { ...init.headers, ...headers } })).text()
+  assert.equal(await h.control("stop"), "stopped")
+  const prepared = { headers: {} }
+  await h.hooks["chat.headers"]!(input(), prepared)
+  assert.deepEqual(prepared.headers, headers)
+  assert.equal(await h.control("stop"), "already-stopped")
+  const before = wire.length
+  await sleep(150)
+  assert.equal(wire.length, before)
+  assert.equal(await h.control("start"), "started")
+  assert.equal(await h.control("start"), "already-started")
+  await sleep(125)
+  assert.equal(wire.length, before + 1)
+  assert.ok(h.logs.some((entry) => entry.event === "warming-stopped" && entry.reason === "user-stop"))
+  assert.ok(h.logs.some((entry) => entry.event === "warming-started" && entry.reason === "user-start"))
+  await h.hooks.dispose!()
+})
+
+test("controls validate root eligibility and starting after expiry awaits ordinary activity", async () => {
+  const h = await harness(undefined, { intervalMs: 10, durationMs: 40 })
+  assert.equal(await h.control("stop", "child"), "not-root")
+  assert.equal(await h.control("start", "child"), "not-root")
+  const headers = await h.headers(input("control-root"))
+  const [url, init] = ordinary()
+  await (await globalThis.fetch(url, { ...init, headers: { ...init.headers, ...headers } })).text()
+  assert.equal(await h.control("stop", "control-root"), "stopped")
+  await sleep(80)
+  assert.equal(await h.control("start", "control-root"), "awaiting-activity")
+  await sleep(25)
+  assert.equal((await readStatus("control-root")).status?.phase, "idle")
+  await h.hooks.dispose!()
+  const unsupported = await harness(async (id) => ({ id, version: "1.19.0" }))
+  assert.equal(await unsupported.control("stop"), "unsupported-session")
+  await unsupported.hooks.dispose!()
+})
+
+test("manual stop during a pending ordinary metadata lookup survives its late preparation", async () => {
+  let release!: (value: unknown) => void
+  let calls = 0
+  const h = await harness(async (id) => {
+    if (++calls === 1) return new Promise((done) => { release = done })
+    return { id, version: "1.18.35" }
+  }, { intervalMs: 50, durationMs: 1000 })
+  const pending = h.headers()
+  await sleep(0)
+  assert.equal(await h.control("stop"), "stopped")
+  release({ id: "root", version: "1.18.35" })
+  const headers = await pending
+  const [url, init] = ordinary()
+  const before = wire.length
+  await (await globalThis.fetch(url, { ...init, headers: { ...init.headers, ...headers } })).text()
+  await sleep(75)
+  assert.equal(wire.length, before + 1)
+  assert.equal(await h.control("start"), "started")
+  await h.hooks.dispose!()
+})
+
+test("deleting a session fences pending control metadata and forgets stopped preference", async () => {
+  let release!: (value: unknown) => void
+  let calls = 0
+  const h = await harness(async (id) => {
+    if (++calls === 1) return new Promise((done) => { release = done })
+    return { id, version: "1.18.35" }
+  })
+  const pending = h.control("stop")
+  await sleep(0)
+  await h.hooks.event!({ event: { type: "session.deleted", properties: { info: { id: "root" } } } } as any)
+  release({ id: "root", version: "1.18.35" })
+  assert.equal(await pending, "expired")
+  assert.equal(await h.control("start"), "awaiting-activity")
+  assert.equal(h.logs.some((entry) => entry.event === "warming-stopped"), false)
   await h.hooks.dispose!()
 })

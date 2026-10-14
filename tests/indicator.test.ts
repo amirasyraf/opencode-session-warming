@@ -144,6 +144,19 @@ test("generation, preparation, sending, and end-of-window never show fake next c
   assert.deepEqual(barCells(indicator({ status: sending }, 960000), 37), barCells(indicator({ status: failed }, 960000), 37))
 })
 
+test("manual stop is distinct from errors and enabled sessions can await fresh activity", () => {
+  const stopped = indicator({ status: { ...base, phase: "stopped", manualStopped: true, stoppedAt: 720000, reason: "user-stop" } }, 4000000)
+  assert.equal(stopped.state, "Stopped")
+  assert.equal(stopped.detail, "By user")
+  assert.equal(stopped.progress, 0.2)
+  const idle = indicator({ status: { ...base, phase: "idle", expiresAt: 0, reason: "awaiting-activity", nextAttemptAt: undefined } }, 4000000)
+  assert.equal(idle.state, "Awaiting activity")
+  assert.equal(idle.detail, "Awaiting model activity")
+  assert.equal(idle.hasWindow, false)
+  assert.equal(idle.next, undefined)
+  assert.equal(idle.left, undefined)
+})
+
 test("completed totals use actual outcomes, not attempts, marks, or elapsed slots", () => {
   for (const phase of ["waiting", "sending", "stopped"] as const) {
     const model = indicator({ status: { ...base, phase, attempted: 10000, completed: 5, failed: 2, marks: [] } }, 900000)

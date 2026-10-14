@@ -185,6 +185,32 @@ test("installed v1 warms blocked parents, preserves OAuth, and stops on cancella
     assert.deepEqual(continuedWarm.input.slice(0, -1), continued.input)
     assert.equal(JSON.stringify(await api(`/session/${id}/message`)).includes(KEEPALIVE), false)
 
+    let controlSequence = 0
+    async function control(action: "start" | "stop", sessionID = id) {
+      const command = "session-warming.control.v1:" + JSON.stringify({ action, sessionID,
+        requestID: `runtime-control-${++controlSequence}`, deadlineAt: Date.now() + 5000 })
+      await api("/tui/publish", { type: "tui.command.execute", properties: { command } })
+    }
+    const historyBeforeStop = JSON.stringify(await api(`/session/${id}/message`))
+    await control("stop")
+    await waitFor(async () => (await readStatus(id, statusPath)).status?.manualStopped === true, "manual stop acknowledgement state")
+    const stoppedCount = requests.filter((request) => request.session === id && request.warm).length
+    await sleep(450)
+    assert.equal(requests.filter((request) => request.session === id && request.warm).length, stoppedCount)
+    assert.equal(JSON.stringify(await api(`/session/${id}/message`)), historyBeforeStop, "stop must not write conversation history")
+    await api(`/session/${id}/message`, { model: { providerID: "openai", modelID: "gpt-5.4" },
+      parts: [{ type: "text", text: "ordinary activity while warming remains manually stopped" }] })
+    await sleep(450)
+    assert.equal(requests.filter((request) => request.session === id && request.warm).length, stoppedCount)
+    assert.equal((await readStatus(id, statusPath)).status?.manualStopped, true)
+    const historyBeforeStart = JSON.stringify(await api(`/session/${id}/message`))
+    await control("start")
+    await waitFor(async () => (await readStatus(id, statusPath)).status?.manualStopped === false, "manual start fresh window")
+    const fresh = (await readStatus(id, statusPath)).status!
+    assert.equal(fresh.expiresAt - fresh.startedAt, 6000)
+    await waitFor(() => requests.filter((request) => request.session === id && request.warm).length > stoppedCount, "warming after manual start")
+    assert.equal(JSON.stringify(await api(`/session/${id}/message`)), historyBeforeStart, "start must not write conversation history")
+
     const cancelled = await api("/session", { title: "cancellation integration" })
     const cancelledID = String(cancelled.id)
     parents.add(cancelledID)

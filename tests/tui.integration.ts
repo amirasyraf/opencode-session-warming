@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { spawn, spawnSync } from "node:child_process"
+import { createServer } from "node:http"
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
@@ -156,6 +157,94 @@ test("interactive v1 renders sidebar progress and responsive fallbacks without p
       if (server.exitCode === null && server.signalCode === null) { server.kill("SIGKILL"); await exited }
     }
     if (failure && process.env.WARMING_KEEP_TEST === "1") console.error(`Kept isolated TUI test artifacts: ${home}`)
+    else await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+  }
+})
+
+test("native warming commands receive acknowledgements without creating conversation turns", { timeout: 180000 }, async (t) => {
+  assert.ok(isSupportedOpenCodeVersion(spawnSync("opencode", ["--version"], { encoding: "utf8" }).stdout.trim()))
+  const project = resolve(fileURLToPath(new URL("..", import.meta.url)))
+  const home = await mkdtemp(join(tmpdir(), "warming-tui-controls-"))
+  const worktree = join(home, "worktree")
+  const configHome = join(home, "config", "opencode")
+  await mkdir(worktree)
+  await mkdir(configHome, { recursive: true })
+  const fixture = join(home, "block-network.ts")
+  await writeFile(fixture, `export default async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (!["127.0.0.1", "localhost"].includes(url.hostname) && url.protocol !== "data:") throw new Error("External network disabled by control fixture");
+      return original(input, init);
+    };
+    return {};
+  };`)
+  await writeFile(join(configHome, "tui.json"), JSON.stringify({ plugin: [pathToFileURL(join(project, "tui.tsx")).href] }))
+  const config = { autoupdate: false, enabled_providers: ["openai"], model: "openai/gpt-5.4",
+    provider: { openai: { options: { apiKey: "fixture-only", baseURL: "http://127.0.0.1:9/v1" },
+      models: { "gpt-5.4": { name: "UI mock", limit: { context: 200000, output: 8192 } } } } },
+    plugin: [pathToFileURL(fixture).href, [pathToFileURL(join(project, "plugin.ts")).href, { intervalMs: 200, durationMs: 6000 }]] }
+  const env = { PATH: process.env.PATH, HOME: home, TMPDIR: home, TERM: "xterm-256color", COLORTERM: "truecolor",
+    XDG_CONFIG_HOME: join(home, "config"), XDG_DATA_HOME: join(home, "data"), XDG_CACHE_HOME: join(home, "cache"),
+    XDG_STATE_HOME: join(home, "state"), OPENCODE_TEST_HOME: home, OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
+    OPENCODE_DISABLE_MODELS_FETCH: "1", OPENCODE_DISABLE_DEFAULT_PLUGINS: "1",
+    OPENCODE_EXPERIMENTAL_NATIVE_LLM: "false", OPENCODE_EXPERIMENTAL_WEBSOCKETS: "false" }
+  const reservation = createServer()
+  await new Promise<void>((done) => reservation.listen(0, "127.0.0.1", done))
+  const port = (reservation.address() as { port: number }).port
+  await new Promise<void>((done) => reservation.close(() => done()))
+  const url = `http://127.0.0.1:${port}`
+  let logs = ""
+  const server = spawn("opencode", ["serve", "--hostname", "127.0.0.1", "--port", String(port)], {
+    cwd: worktree, env, stdio: ["ignore", "pipe", "pipe"],
+  })
+  server.stdout.on("data", (chunk) => { logs = (logs + chunk).slice(-16000) })
+  server.stderr.on("data", (chunk) => { logs = (logs + chunk).slice(-16000) })
+  let failure = false
+  try {
+    async function api(path: string, body?: unknown) {
+      const response = await fetch(url + path, { method: body === undefined ? "GET" : "POST",
+        headers: { "content-type": "application/json", "x-opencode-directory": worktree },
+        body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.any([AbortSignal.timeout(path === "/global/health" ? 2000 : 45000), t.signal]) })
+      assert.ok(response.ok, `${path}: ${response.status}`)
+      return response.json() as Promise<any>
+    }
+    const until = Date.now() + 45000
+    let startupError: unknown
+    while (true) {
+      try { if (isSupportedOpenCodeVersion((await api("/global/health")).version)) break } catch (error) { startupError = error }
+      assert.ok(Date.now() < until && server.exitCode === null, `Server startup failed: ${String(startupError)}\n${logs}`)
+      await sleep(100)
+    }
+    const session = await api("/session", { title: "Warming controls fixture" })
+    const before = await api(`/session/${session.id}/message`)
+    const child = spawn("python3", [join(project, "tests", "tui_driver.py"), worktree, url, session.id], {
+      signal: t.signal, env: { ...env, WARMING_TUI_LAYOUT_ONLY: "controls" }, stdio: ["ignore", "pipe", "pipe"],
+    })
+    let output = ""
+    let errors = ""
+    child.stdout.on("data", (chunk) => { output += chunk })
+    child.stderr.on("data", (chunk) => { errors += chunk })
+    const code = await new Promise<number | null>((done, reject) => { child.once("error", reject); child.once("close", done) })
+    const pluginLogs = await readFile(join(home, "data", "opencode", "log", "opencode.log"), "utf8")
+    assert.equal(code, 0, `Control TUI failed\n${output}\n${errors}\n${pluginLogs}`)
+    const result = JSON.parse(output)
+    for (const field of ["controlStopped", "controlStarted", "controlInvalid", "controlMenu", "controlDraft"])
+      assert.equal(result[field], true, `${field} failed\n${result.output}`)
+    assert.deepEqual(await api(`/session/${session.id}/message`), before)
+    assert.equal((await api("/session/status"))[session.id], undefined)
+    assert.match(pluginLogs, /warming-stopped/)
+    assert.match(pluginLogs, /warming-started/)
+    assert.doesNotMatch(pluginLogs, /warm-started|warm-completed|initialization-failed/)
+  } catch (error) { failure = true; throw error }
+  finally {
+    if (server.exitCode === null && server.signalCode === null) {
+      const closed = new Promise<void>((done) => server.once("close", () => done()))
+      server.kill("SIGTERM")
+      await Promise.race([closed, sleep(3000)])
+      if (server.exitCode === null && server.signalCode === null) { server.kill("SIGKILL"); await closed }
+    }
+    if (failure && process.env.WARMING_KEEP_TEST === "1") console.error(`Kept control TUI fixture: ${home}`)
     else await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
   }
 })
