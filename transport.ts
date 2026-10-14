@@ -108,7 +108,9 @@ export function transport(): Transport {
         return response
       }
     } catch (error) {
-      if (observation) complete(observation, false, { reason: "ordinary-fetch-error", ...errorDetails(error) })
+      const signal = clean.signal ?? (input instanceof Request ? input.signal : undefined)
+      if (observation) complete(observation, false, { ...errorDetails(error),
+        reason: signal?.aborted ? "ordinary-aborted" : "ordinary-fetch-error" })
       throw error
     }
   }) as typeof fetch

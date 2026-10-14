@@ -68,7 +68,7 @@ test("root capture follows OAuth routing, excludes children/hidden calls and pre
   await h.hooks.dispose!()
 })
 
-test("cancellation/revert/compaction events clear captures and disposed hooks remain inert", async () => {
+test("errors/revert/compaction events clear captures and disposed hooks remain inert", async () => {
   const h = await harness()
   await h.headers()
   await h.hooks.event!({ event: { type: "session.error", properties: { sessionID: "root" } } })
@@ -157,7 +157,7 @@ test("expired recovery retries transient metadata failures and respects reverts"
   await h.hooks.dispose!()
 })
 
-test("aborted assistant updates clear expired recovery candidates", async () => {
+test("aborted assistant updates preserve expired recovery candidates", async () => {
   const h = await harness(undefined, { intervalMs: 10, durationMs: 40 })
   const first = await h.headers(input("root", "build", "openai", "first"))
   const [url, init] = ordinary()
@@ -169,8 +169,41 @@ test("aborted assistant updates clear expired recovery candidates", async () => 
   } } } } as any)
   const resumed = { headers: {} as Record<string, string> }
   await h.hooks["chat.headers"]!(input("root", "build", "openai", "resumed"), resumed)
-  assert.deepEqual(resumed.headers, {})
+  assert.ok(resumed.headers[CAPTURE_HEADER])
   await h.hooks.dispose!()
+})
+
+test("agent abort events preserve warming after ordinary body cancellation", async () => {
+  const h = await harness(undefined, { intervalMs: 10, durationMs: 1000 })
+  try {
+    const headers = await h.headers()
+    const [url, init] = ordinary()
+    const controller = new AbortController()
+    const response = await globalThis.fetch(url, { ...init, signal: controller.signal, headers: { ...init.headers, ...headers } })
+    // Events can arrive before raw cancellation; they must not admit a replay early.
+    await h.hooks.event!({ event: { type: "session.error", properties: {
+      sessionID: "root", error: { name: "MessageAbortedError", data: { message: "Stopped" } },
+    } } } as any)
+    await h.hooks.event!({ event: { type: "message.updated", properties: { info: {
+      id: "aborted-assistant", role: "assistant", sessionID: "root", error: { name: "MessageAbortedError" },
+      time: { created: Date.now(), completed: Date.now() },
+    } } } } as any)
+    await sleep(30)
+    assert.equal(h.logs.some((log) => log.event === "warm-started"), false)
+    controller.abort()
+    await response.body!.cancel()
+    await sleep(40)
+    assert.ok(h.logs.some((log) => log.event === "captured" && log.reason === "ordinary-aborted"))
+    assert.ok(h.logs.some((log) => log.event === "warm-completed"))
+    assert.equal(h.logs.some((log) => log.event === "stopped"), false)
+    // A delayed abort event must also leave an admitted snapshot intact.
+    await h.hooks.event!({ event: { type: "session.error", properties: {
+      sessionID: "root", error: { name: "MessageAbortedError", data: { message: "Stopped" } },
+    } } } as any)
+    const out = { headers: {} as Record<string, string> }
+    await h.hooks["chat.headers"]!(input(), out)
+    assert.equal(out.headers[CAPTURE_HEADER], headers[CAPTURE_HEADER])
+  } finally { await h.hooks.dispose!() }
 })
 
 test("unsupported transports and invalid options emit no capture hooks", async () => {

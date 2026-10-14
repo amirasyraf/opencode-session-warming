@@ -128,10 +128,12 @@ not claim a cache hit or a cost saving after a request completes.
    including when the new request is unsupported.
 2. The plugin captures the outgoing request after OpenCode authentication and
    routing finish.
-3. It waits for the ordinary response body to finish before scheduling warming.
+3. It waits for the ordinary response body to finish or be cancelled before
+   scheduling warming. Stopping the agent keeps warming the captured input
+   until the original window expires; it does not restart the timer.
 4. A supported request is replayed directly to its provider at the selected
    interval, until the fixed window expires.
-5. New ordinary activity, cancellation, compaction, revert, deletion, errors,
+5. New ordinary activity, compaction, revert, deletion, non-cancellation errors,
    disposal, sleep/resume gaps, and incompatible responses stop the snapshot.
    A resumed root-model request can establish a fresh window after expiry.
 

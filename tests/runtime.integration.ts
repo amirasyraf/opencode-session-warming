@@ -195,7 +195,8 @@ test("installed v1 warms blocked parents, preserves OAuth, and stops on cancella
     await cancelledPrompt
     const before = requests.filter((request) => request.session === cancelledID && request.warm).length
     await sleep(600)
-    assert.equal(requests.filter((request) => request.session === cancelledID && request.warm).length, before)
+    assert.ok(requests.filter((request) => request.session === cancelledID && request.warm).length > before,
+      "ordinary cancellation should preserve the captured input for warming")
   } catch (error) {
     throw new Error(`Runtime integration failed: ${String(error)}\n${processLogs}`, { cause: error })
   } finally {

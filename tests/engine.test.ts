@@ -60,11 +60,46 @@ test("modern model defaults and failed retries have independent deadlines", asyn
   h.engine.dispose()
 })
 
-function finish(observation: Observation, ok: boolean) {
+function finish(observation: Observation, ok: boolean, failure?: Parameters<NonNullable<Observation["complete"]>>[1]) {
   const callback = observation.complete
   observation.complete = undefined
-  callback?.(ok)
+  callback?.(ok, failure)
 }
+
+test("ordinary cancellation admits the captured input without extending the window", async () => {
+  for (const reason of ["ordinary-aborted", "ordinary-stream-cancelled"]) {
+    const h = harness()
+    const token = h.engine.prepare("parent", true)!
+    const observation = h.captures.get(token)!(...ordinary())!
+    await h.clock.advance(150)
+    assert.equal(h.requests.length, 0)
+    finish(observation, false, { reason })
+    assert.equal(h.statuses.at(-1)?.phase, "waiting")
+    assert.equal(h.statuses.at(-1)?.expiresAt, 1000)
+    assert.ok(h.logs.some((log) => log.event === "captured" && log.reason === reason))
+    assert.equal(h.logs.find((log) => log.event === "captured")?.completedAt, undefined)
+    await h.clock.advance(0)
+    assert.equal(h.requests.length, 1)
+    assert.equal(JSON.parse(h.requests[0]!.body as string).input[0].role, "user")
+    await h.clock.advance(100)
+    assert.equal(h.requests.length, 2)
+    await h.clock.advance(750)
+    assert.equal(h.engine.has("parent"), false)
+    assert.equal(h.statuses.at(-1)?.phase, "expired")
+  }
+})
+
+test("non-cancellation ordinary failures do not admit a replay", async () => {
+  for (const reason of ["ordinary-fetch-error", "ordinary-stream-error", "ordinary-http-error", "observer-failed"]) {
+    const h = harness()
+    const token = h.engine.prepare("parent", true)!
+    finish(h.captures.get(token)!(...ordinary())!, false, { reason })
+    await h.clock.advance(500)
+    assert.equal(h.requests.length, 0, reason)
+    assert.equal(h.statuses.at(-1)?.phase, "stopped", reason)
+    h.engine.dispose()
+  }
+})
 
 test("options reject invalid, unknown, ineffective and unsafe timer values", () => {
   assert.deepEqual(settings(), { enabled: true, durationMs: 3600000, debug: false, journal: { enabled: true, retentionDays: 365 } })

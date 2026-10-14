@@ -237,11 +237,15 @@ export class WarmingEngine {
       state.pending = undefined
       state.active = false
       if (this.clock.now() >= state.expiresAt!) { this.invalidate(sessionID, "expired"); return }
-      if (ok) {
+      // Cancellation ends ordinary generation, but the validated outgoing input
+      // remains replayable. It does not prove ordinary response completion.
+      const replayable = ok || failure?.reason === "ordinary-aborted" || failure?.reason === "ordinary-stream-cancelled"
+      if (replayable) {
         state.snapshot = snapshot
-        this.emit({ event: "captured", sessionID, windowID: state.windowID, ...state.metadata, completedAt: this.clock.now(),
+        this.emit({ event: "captured", sessionID, windowID: state.windowID, ...state.metadata, completedAt: ok ? this.clock.now() : undefined,
           providerID: state.context.providerID, model: state.context.modelID,
           adapterID: snapshot.adapterID, strategy: snapshot.strategy, ...state.policy,
+          reason: ok ? undefined : failure?.reason,
           nextAttemptAt: Math.max(this.clock.now(), state.nextAt!) < state.expiresAt! ? Math.max(this.clock.now(), state.nextAt!) : undefined,
           expiresAt: state.expiresAt })
       } else {
@@ -250,7 +254,7 @@ export class WarmingEngine {
       }
       // Leave registration alive for ordinary transport retries using the same marker.
       this.schedule(sessionID, state)
-      this.notify(sessionID, state, ok ? "waiting" : "stopped", ok ? undefined : "ordinary-transport-failed")
+      this.notify(sessionID, state, replayable ? "waiting" : "stopped", replayable ? undefined : "ordinary-transport-failed")
     } }
     state.pending = observation
     return observation

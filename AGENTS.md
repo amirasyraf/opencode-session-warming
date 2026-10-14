@@ -56,6 +56,10 @@ store, background daemon, task counter, or conversation reconstruction layer.
   for children, hidden agents, compaction, or unsupported models.
 - Raw transport completion, not `session.busy` or processed stream completion,
   decides when the parent is still generating.
+- Agent cancellation (`MessageAbortedError`) does not invalidate warming or
+  expiry recovery. Ordinary transport abort/body cancellation admits the
+  validated outgoing snapshot for replay without proving response completion
+  or extending the original deadline. Other transport failures remain failures.
 - Reject conversation-state references, provider-hosted tools, unimplemented
   input types, unsupported media, and request bodies over 16 MiB.
 - Preserve the complete provider input chain, including file attachments, in

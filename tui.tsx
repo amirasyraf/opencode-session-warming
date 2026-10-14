@@ -10,16 +10,20 @@ import { readStatus } from "./status.ts"
 import type { StatusRead, UsageStats } from "./status.ts"
 import { isSupportedOpenCodeVersion } from "./compatibility.ts"
 
-function rootSession(api: TuiPluginApi): { id?: string; parent: boolean } {
+function rootSession(api: TuiPluginApi, sessionID?: string): { id?: string; parent: boolean } {
   const route = api.route.current
-  if (route.name !== "session" || !route.params || typeof route.params.sessionID !== "string") return { parent: false }
-  let id = route.params.sessionID
+  let current = sessionID
+  if (!current) {
+    if (route.name !== "session" || !route.params || typeof route.params.sessionID !== "string") return { parent: false }
+    current = route.params.sessionID
+  }
+  let id = current
   const visited = new Set<string>()
   for (let depth = 0; depth < 8; depth++) {
     if (visited.has(id)) return { parent: true }
     visited.add(id)
     const parent = api.state.session.get(id)?.parentID
-    if (!parent) return { id, parent: id !== route.params.sessionID }
+    if (!parent) return { id, parent: id !== current }
     id = parent
   }
   return { parent: true }
@@ -119,10 +123,12 @@ function View(props: { api: TuiPluginApi; options: UiOptions; sidebar?: boolean;
   const layout = createMemo(() => compactLayout(model(), Math.min(targetWidth(), measured() ?? targetWidth()), root().parent))
   let generation = 0
   let inFlight = false
+  let refreshQueued = false
   let disposed = false
   const refresh = async () => {
     const id = root().id
-    if (inFlight || disposed || !id) return
+    if (disposed || !id) return
+    if (inFlight) { refreshQueued = true; return }
     inFlight = true
     const current = generation
     try {
@@ -130,7 +136,10 @@ function View(props: { api: TuiPluginApi; options: UiOptions; sidebar?: boolean;
       if (!disposed && current === generation) setStatus(value)
     } catch {
       if (!disposed && current === generation) setStatus({ unavailable: "read-failed" })
-    } finally { inFlight = false }
+    } finally {
+      inFlight = false
+      if (refreshQueued && !disposed) { refreshQueued = false; void refresh() }
+    }
   }
   createEffect(() => {
     root().id

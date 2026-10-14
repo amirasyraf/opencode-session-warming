@@ -235,7 +235,8 @@ test("installed v1 preserves authenticated OpenAI/Copilot prefixes while warming
       await cancelledPrompt
       const count = requests.filter((request) => request.session === session && request.warm).length
       await sleep(450)
-      assert.equal(requests.filter((request) => request.session === session && request.warm).length, count)
+      assert.ok(requests.filter((request) => request.session === session && request.warm).length > count,
+        "ordinary cancellation should preserve the captured input for warming")
     }
     assert.ok(requests.filter((request) => !parents.has(request.session)).every((request) => !request.warm), "children never warm")
   } finally {

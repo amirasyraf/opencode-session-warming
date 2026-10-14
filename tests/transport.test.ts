@@ -45,9 +45,29 @@ test("stream errors and cancellation report failure without changing the underly
   assert.deepEqual(calls, [false, false])
 })
 
+test("abort and body cancellation report their reason once despite late body completion", async () => {
+  for (const abort of [true, false]) {
+    const calls: unknown[] = []
+    const controller = new AbortController()
+    const observed = observeResponse(new Response("payload"), controller.signal, {
+      complete: (ok, failure) => calls.push({ ok, reason: failure?.reason }),
+    })
+    if (abort) {
+      controller.abort()
+      assert.equal(await observed.text(), "payload")
+    } else await observed.body!.cancel()
+    assert.deepEqual(calls, [{ ok: false, reason: abort ? "ordinary-aborted" : "ordinary-stream-cancelled" }])
+  }
+})
+
 test("one shared interceptor scrubs late markers and keeps unmarked traffic untouched", async () => {
   const seen: [RequestInfo | URL, RequestInit | undefined][] = []
-  globalThis.fetch = (async (input, init) => { seen.push([input, init]); return new Response("ok") }) as typeof fetch
+  const failure = new Error("fixture fetch failure")
+  globalThis.fetch = (async (input, init) => {
+    seen.push([input, init])
+    if (String(input).endsWith("/failure")) throw failure
+    return new Response("ok")
+  }) as typeof fetch
   const http = transport()
   assert.equal(transport(), http)
   const normal = { method: "POST", body: "unchanged", headers: { "x-normal": "yes" } }
@@ -72,4 +92,15 @@ test("one shared interceptor scrubs late markers and keeps unmarked traffic unto
   assert.equal(init.headers[CAPTURE_HEADER], "capture")
   await http.fetch("https://example.invalid", { ...normal })
   assert.equal(seen.length, 4, "unwrapped warm transport does not recurse")
+  for (const aborted of [true, false]) {
+    const controller = new AbortController()
+    if (aborted) controller.abort()
+    const calls: unknown[] = []
+    http.register("fetch-failure", () => ({ complete: (ok, details) => calls.push({ ok, reason: details?.reason }) }))
+    await assert.rejects(globalThis.fetch("https://example.invalid/failure", {
+      signal: controller.signal, headers: { [CAPTURE_HEADER]: "fetch-failure" },
+    }), failure)
+    assert.deepEqual(calls, [{ ok: false, reason: aborted ? "ordinary-aborted" : "ordinary-fetch-error" }])
+    http.remove("fetch-failure")
+  }
 })

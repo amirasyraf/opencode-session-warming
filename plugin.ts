@@ -167,7 +167,9 @@ const plugin: Plugin = async ({ client, project }, options = {}) => {
         const usage = normalizedUsage(part.tokens)
         if (usage) engine.recordOrdinaryUsage(part.sessionID, usage)
       }
-      if (event.type === "session.error" && event.properties.sessionID) clear(event.properties.sessionID, "session-error")
+      if (event.type === "session.error" && event.properties.sessionID && event.properties.error?.name !== "MessageAbortedError") {
+        clear(event.properties.sessionID, "session-error")
+      }
       if (event.type === "session.compacted") clear(event.properties.sessionID, "compacted")
       if (event.type === "session.deleted") {
         clear(event.properties.info.id, "deleted")
@@ -180,7 +182,8 @@ const plugin: Plugin = async ({ client, project }, options = {}) => {
       if (event.type === "message.updated") {
         const info = event.properties.info
         if (info.role === "assistant" && info.error?.name === "MessageAbortedError") {
-          clear(info.sessionID, "session-error")
+          // The raw transport decides when generation ends; cancellation does
+          // not invalidate its replay or extend the warming window.
           return
         }
         if (info.role === "assistant" && info.time.completed && engine.has(info.sessionID) && !info.summary) {
