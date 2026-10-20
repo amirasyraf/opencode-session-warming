@@ -32,8 +32,10 @@ test("OpenCode V2 TUI renders warming status and consumes /warming controls loca
         { wait: "By user", timeout: 10, name: "stopped state" },
         { type: "/warming start" }, { sleep: 0.5 }, { key: "enter" },
         { wait: "Warming started", timeout: 15, name: "start acknowledged" },
+        { type: "/warming extend 30m" }, { sleep: 0.5 }, { key: "enter" },
+        { wait: "Warming window extended", timeout: 15, name: "extend acknowledged" },
         { type: "/warming bogus" }, { sleep: 0.5 }, { key: "enter" },
-        { wait: "Usage: /warming", timeout: 10, name: "usage toast" },
+        { wait: "extend \\[duration\\]", timeout: 10, name: "usage toast" },
         { sleep: 2 },
         { resize: 90 }, { sleep: 2 }, { snapshot: "narrow" },
         { count: "Requests Sent|\\bWarm(?:ing)?\\b", name: "narrow count" },
@@ -52,7 +54,9 @@ test("OpenCode V2 TUI renders warming status and consumes /warming controls loca
     assert.match(log, /\[session-warming\] ui-ready/)
     assert.equal(result.results.find((value: { name: string }) => value.name === "sidebar count").count, 1, "exactly one sidebar indicator")
     assert.ok(result.results.find((value: { name: string }) => value.name === "narrow count").count >= 1, `narrow fallback missing\n${result.snapshots.narrow}`)
-    assert.equal((await server.rpc("status", { sessionID: id })).status.manualStopped, false)
+    const final = (await server.rpc("status", { sessionID: id })).status
+    assert.equal(final.manualStopped, false)
+    assert.equal(final.durationMs, 600000 + 1800000, "the TUI extension reached the server")
     assert.equal(requests.filter((request) => !request.warm).length, ordinaryBefore, "TUI controls never submit a model prompt")
     assert.equal(JSON.stringify(await api("GET", `/api/session/${id}/message`)), history, "controls write no conversation history")
   } catch (error) {

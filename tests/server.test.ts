@@ -211,6 +211,31 @@ test("RPC controls stop and restart warming without history writes, and validate
   await h.cleanup?.()
 })
 
+test("RPC extend lengthens the live window without replacing its capture or writing history", async () => {
+  warms.length = 0
+  const h = await harness()
+  await h.ordinary("root")
+  await sleep(100)
+  const before = (await h.rpc("status", { sessionID: "root" })).status
+  assert.equal((await h.rpc("control", { requestID: "e1", sessionID: "root", action: "extend", durationMs: 300 })).result, "extended")
+  assert.equal((await h.rpc("control", { requestID: "e1", sessionID: "root", action: "extend", durationMs: 300 })).result, "extended", "duplicate applies once")
+  let status = (await h.rpc("status", { sessionID: "root" })).status
+  assert.equal(status.durationMs, 3300)
+  assert.equal(status.expiresAt, before.expiresAt + 300)
+  assert.equal(status.startedAt, before.startedAt)
+  assert.ok(status.completed >= before.completed, "statistics are not reset")
+  assert.equal((await h.rpc("control", { requestID: "e2", sessionID: "root", action: "extend" })).result, "extended")
+  status = (await h.rpc("status", { sessionID: "root" })).status
+  assert.equal(status.durationMs, 6300, "a bare extend adds one configured duration")
+  assert.equal((await h.rpc("control", { requestID: "e3", sessionID: "child", action: "extend" })).result, "not-root")
+  assert.equal((await h.rpc("control", { requestID: "e4", sessionID: "other", action: "extend" })).result, "awaiting-activity")
+  assert.equal((await h.rpc("control", { requestID: "e5", sessionID: "root", action: "start", durationMs: 300 })).result, "unavailable")
+  assert.equal((await h.rpc("control", { requestID: "e6", sessionID: "root", action: "extend", durationMs: 0 })).result, "unavailable")
+  await h.cleanup?.()
+  const log = await readFile(join(stateHome, "opencode", "session-warming", "plugin.log"), "utf8")
+  assert.match(log, /warming-extended/)
+})
+
 test("native warming configuration suspends every window until it is removed", async () => {
   warms.length = 0
   const h = await harness()

@@ -480,6 +480,51 @@ test("user stop preserves a replay and start creates one fresh window without ca
   h.engine.dispose()
 })
 
+test("extension lengthens a live window without resetting state or manual stop", async () => {
+  const h = harness()
+  h.start()(true)
+  await h.clock.advance(100)
+  const windowID = h.logs.filter((entry) => entry.event === "window-started").at(-1)?.windowID
+  const before = h.statuses.at(-1)!
+  assert.equal(h.engine.extendWarming("parent", 250), "extended")
+  const extended = h.statuses.at(-1)!
+  assert.equal(extended.durationMs, 1250)
+  assert.equal(extended.expiresAt, 1250)
+  assert.equal(extended.startedAt, before.startedAt)
+  assert.equal(extended.completed, 1)
+  assert.equal(extended.marks.length, before.marks.length)
+  assert.equal(extended.nextAttemptAt, before.nextAttemptAt, "the next warm target is unchanged")
+  const record = h.logs.find((entry) => entry.event === "warming-extended")!
+  assert.equal(record.durationMs, 250)
+  assert.equal(record.reason, "user-extend")
+  assert.equal(record.windowID, windowID)
+  assert.equal(h.logs.filter((entry) => entry.event === "window-started").length, 1, "no fresh window")
+  assert.equal(h.engine.extendWarming("parent"), "extended")
+  assert.equal(h.statuses.at(-1)?.durationMs, 2250)
+  h.engine.stop("parent")
+  assert.equal(h.engine.extendWarming("parent", 100), "extended")
+  assert.equal(h.statuses.at(-1)?.manualStopped, true)
+  assert.equal(h.statuses.at(-1)?.expiresAt, 2350)
+  assert.equal(h.engine.extendWarming("parent", 2_147_482_000), "duration-limit")
+  assert.equal(h.statuses.at(-1)?.expiresAt, 2350)
+  h.engine.dispose()
+})
+
+test("extension keeps warming past the original expiry but never resurrects expired state", async () => {
+  const h = harness()
+  h.start()(true)
+  assert.equal(h.engine.extendWarming("parent", 500), "extended")
+  await h.clock.advance(1200)
+  assert.notEqual(h.statuses.at(-1)?.phase, "expired")
+  assert.ok(h.requests.length >= 11)
+  await h.clock.advance(300)
+  assert.equal(h.statuses.at(-1)?.phase, "expired")
+  assert.equal(h.engine.extendWarming("parent", 500), "awaiting-activity")
+  assert.equal(h.statuses.at(-1)?.phase, "expired")
+  h.engine.dispose()
+  assert.equal(h.engine.extendWarming("parent"), "unavailable")
+})
+
 test("user stop survives new ordinary activity and captures the latest complete input", async () => {
   const h = harness()
   h.start()(true)

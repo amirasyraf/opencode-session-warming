@@ -1,28 +1,62 @@
 import { within } from "./diagnostics.ts"
+import { MAX_TIMER } from "./cache-policy.ts"
 
 export const CONTROL_TIMEOUT_MS = 5000
-export type ControlAction = "start" | "stop"
+export type ControlAction = "start" | "stop" | "extend"
 export type ControlResult = "started" | "stopped" | "already-started" | "already-stopped" | "awaiting-activity" |
-  "configured-off" | "native-warming" | "unavailable" | "not-root" | "busy" | "expired"
-export type ControlRequest = { requestID: string; sessionID: string; action: ControlAction; deadlineAt: number }
+  "extended" | "duration-limit" | "configured-off" | "native-warming" | "unavailable" | "not-root" | "busy" | "expired"
+/** `durationMs` is present only for an explicit `extend` duration; a bare extend adds one configured window. */
+export type ControlRequest = { requestID: string; sessionID: string; action: ControlAction; deadlineAt: number; durationMs?: number }
+export type WarmingCommand = "start" | "stop" | "menu" | "invalid" | { action: "extend"; durationMs?: number }
 export const controlResults: readonly ControlResult[] = ["started", "stopped", "already-started", "already-stopped", "awaiting-activity",
-  "configured-off", "native-warming", "unavailable", "not-root", "busy", "expired"]
+  "extended", "duration-limit", "configured-off", "native-warming", "unavailable", "not-root", "busy", "expired"]
 const id = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value)
 
 /** Validate an RPC control input. Only reconstructed metadata is accepted; editor text never crosses. */
 export function controlRequest(value: unknown, now = Date.now()): ControlRequest | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return
   const input = value as Record<string, unknown>
-  if (Object.keys(input).some((key) => !["requestID", "sessionID", "action"].includes(key))) return
-  if (!id(input.requestID) || !id(input.sessionID) || (input.action !== "start" && input.action !== "stop")) return
-  return { requestID: input.requestID, sessionID: input.sessionID, action: input.action, deadlineAt: now + CONTROL_TIMEOUT_MS }
+  if (Object.keys(input).some((key) => !["requestID", "sessionID", "action", "durationMs"].includes(key))) return
+  if (!id(input.requestID) || !id(input.sessionID) || !["start", "stop", "extend"].includes(input.action as string)) return
+  if (input.durationMs !== undefined && (input.action !== "extend" || !validDuration(input.durationMs))) return
+  return { requestID: input.requestID, sessionID: input.sessionID, action: input.action as ControlAction, deadlineAt: now + CONTROL_TIMEOUT_MS,
+    ...(input.durationMs === undefined ? {} : { durationMs: input.durationMs as number }) }
+}
+
+const validDuration = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= MAX_TIMER
+
+/** Parse a bounded ASCII duration (`30m`, `1h`, `1h30m`) without locale, decimal, or whitespace variants. */
+export function parseDuration(value: string): number | undefined {
+  if (!value) return
+  const units: Record<string, number> = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }
+  let total = 0
+  let end = 0
+  let previous = Infinity
+  for (const match of value.matchAll(/(\d+)([smhd])/g)) {
+    if (match.index !== end) return
+    const unit = units[match[2]!]!
+    const amount = Number(match[1])
+    const milliseconds = amount * unit
+    // Units must strictly descend, which also rejects repeated units.
+    if (!Number.isSafeInteger(amount) || !Number.isSafeInteger(milliseconds) || unit >= previous || total > MAX_TIMER - milliseconds) return
+    total += milliseconds
+    previous = unit
+    end += match[0].length
+  }
+  return end === value.length && total > 0 ? total : undefined
 }
 
 /** Arguments after `/warming`, as passed by OpenCode V2's argument slash commands. */
-export function parseWarmingArguments(input: string | undefined): ControlAction | "menu" | "invalid" {
+export function parseWarmingArguments(input: string | undefined): WarmingCommand {
   const value = (input ?? "").trim()
   if (!value) return "menu"
-  return value === "start" || value === "stop" ? value : "invalid"
+  if (value === "start" || value === "stop") return value
+  const match = /^extend(?:[ \t]+([^ \t]+))?$/.exec(value)
+  if (!match) return "invalid"
+  if (match[1] === undefined) return { action: "extend" }
+  const durationMs = parseDuration(match[1])
+  return durationMs === undefined ? "invalid" : { action: "extend", durationMs }
 }
 
 type Entry = { request: ControlRequest; work: Promise<ControlResult>; cancelled: boolean }
@@ -44,7 +78,8 @@ export class ControlServer {
     for (const [key, entry] of this.entries) if (entry.request.deadlineAt + CONTROL_TIMEOUT_MS <= now) this.entries.delete(key)
     const existing = this.entries.get(request.requestID)
     if (existing) {
-      if (existing.request.sessionID !== request.sessionID || existing.request.action !== request.action) return "busy"
+      if (existing.request.sessionID !== request.sessionID || existing.request.action !== request.action ||
+          existing.request.durationMs !== request.durationMs) return "busy"
       return existing.work
     }
     if (this.entries.size >= 128 || this.queues.size >= 32) return "busy"

@@ -24,6 +24,7 @@ const NATIVE_CHECK_MS = 30_000
 const controlMessages: Record<ControlResult | "unconfirmed", string> = {
   started: "Warming started with a fresh window.", stopped: "Warming stopped.",
   "already-started": "Warming is already enabled for this window.", "already-stopped": "Warming is already stopped.",
+  extended: "Warming window extended.", "duration-limit": "Warming cannot be extended any further.",
   "awaiting-activity": "Warming enabled. Awaiting supported model activity.",
   "configured-off": "Warming is disabled by configuration.",
   "native-warming": "OpenCode native warming is configured; this plugin stays suspended.",
@@ -100,10 +101,11 @@ function createWarmingClient(context: Context, log: ReturnType<typeof createDiag
     if (status && status.sessionID === data.sessionID) store(status.sessionID, { status, native: reads()[status.sessionID]?.native })
   })
 
-  const control = async (action: ControlAction, root: Root): Promise<ControlResult | "unconfirmed"> => {
+  const control = async (action: ControlAction, root: Root, durationMs?: number): Promise<ControlResult | "unconfirmed"> => {
     if (!root.id || !root.location) return "unavailable"
+    const input = { requestID: randomUUID(), sessionID: root.id, action, ...(durationMs === undefined ? {} : { durationMs }) }
     try {
-      const output = await within((signal) => rpc.control({ requestID: randomUUID(), sessionID: root.id!, action }, { location: root.location, signal }),
+      const output = await within((signal) => rpc.control(input, { location: root.location, signal }),
         CONTROL_TIMEOUT_MS, "metadata-timeout") as { result?: unknown }
       const result = controlResults.find((value) => value === output?.result)
       return result ?? "unconfirmed"
@@ -128,13 +130,13 @@ function registerControls(context: Context, client: WarmingClient) {
   let disposed = false
   const toast = (message: string, variant: "info" | "warning" = "info", title?: string) =>
     context.ui.toast.show({ ...(title ? { title } : {}), message, variant })
-  const run = async (action: ControlAction, root = currentRoot(context)) => {
+  const run = async (action: ControlAction, root = currentRoot(context), durationMs?: number) => {
     if (!root.id) { toast("Open a session to control warming."); return }
     if (pending.has(root.id)) { toast("A warming control request is pending."); return }
     pending.add(root.id)
     try {
-      const result = await client.control(action, root)
-      if (!disposed) toast(controlMessages[result], ["started", "stopped", "already-started", "already-stopped", "awaiting-activity"].includes(result)
+      const result = await client.control(action, root, durationMs)
+      if (!disposed) toast(controlMessages[result], ["started", "stopped", "extended", "already-started", "already-stopped", "awaiting-activity"].includes(result)
         ? "info" : "warning", root.parent ? "Parent session warming" : "Warming")
     } finally { pending.delete(root.id) }
   }
@@ -150,6 +152,10 @@ function registerControls(context: Context, client: WarmingClient) {
       options: [
         { title: "Start warming", value: "start", description: "Start a fresh window, or await model activity", disabled: !!active || pending.has(root.id) },
         { title: "Stop warming", value: "stop", description: "Keep warming stopped until you start it", disabled: status?.manualStopped === true || pending.has(root.id) },
+        { title: "Extend warming", value: "extend", description: "Add one configured window duration",
+          // Only a live window (running, or manually stopped with its snapshot retained) can be extended.
+          disabled: !status || !(["preparing", "generating", "waiting", "sending"].includes(status.phase) || status.manualStopped === true) ||
+            !status.expiresAt || Date.now() >= status.expiresAt || pending.has(root.id) },
       ],
     })
     if (action && !disposed && currentRoot(context).id === root.id) await run(action, root)
@@ -162,12 +168,14 @@ function registerControls(context: Context, client: WarmingClient) {
         // OpenCode clears the prompt before running argument slash commands; nothing else is submitted.
         run: (input) => {
           const parsed = parseWarmingArguments(input)
-          if (parsed === "invalid") { toast("Usage: /warming, /warming start, or /warming stop"); return }
-          return parsed === "menu" ? menu() : run(parsed)
+          if (parsed === "invalid") { toast("Usage: /warming, /warming start, /warming stop, or /warming extend [duration]"); return }
+          if (parsed === "menu") return menu()
+          return typeof parsed === "string" ? run(parsed) : run(parsed.action, undefined, parsed.durationMs)
         },
       },
       { id: "session-warming.start", title: "Start warming", group: "Session", palette: true, run: () => run("start") },
       { id: "session-warming.stop", title: "Stop warming", group: "Session", palette: true, run: () => run("stop") },
+      { id: "session-warming.extend", title: "Extend warming", group: "Session", palette: true, run: () => run("extend") },
     ],
   }))
   return () => { disposed = true; pending.clear() }

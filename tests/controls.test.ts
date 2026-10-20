@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { setTimeout as sleep } from "node:timers/promises"
-import { ControlServer, controlRequest, parseWarmingArguments } from "../controls.ts"
+import { ControlServer, controlRequest, parseDuration, parseWarmingArguments } from "../controls.ts"
 import type { ControlRequest, ControlResult } from "../controls.ts"
 
 const request = (sessionID = "root", action: "start" | "stop" = "stop", requestID = `req-${Math.random().toString(36).slice(2)}`) =>
@@ -12,7 +12,20 @@ test("slash arguments map to the menu or one exact action; anything else is usag
   assert.equal(parseWarmingArguments("  "), "menu")
   assert.equal(parseWarmingArguments("start"), "start")
   assert.equal(parseWarmingArguments(" stop "), "stop")
-  for (const value of ["restart", "start now", "stop!", "START"]) assert.equal(parseWarmingArguments(value), "invalid")
+  assert.deepEqual(parseWarmingArguments("extend"), { action: "extend" })
+  assert.deepEqual(parseWarmingArguments(" extend 1h30m "), { action: "extend", durationMs: 5_400_000 })
+  assert.deepEqual(parseWarmingArguments("extend\t30m"), { action: "extend", durationMs: 1_800_000 })
+  for (const value of ["restart", "start now", "stop!", "START", "extend nope", "extend 1h 30m", "extend 1m1h",
+    "extend 30m extra", "extend 0m", "extend 1.5h", "stop 30m"]) assert.equal(parseWarmingArguments(value), "invalid", value)
+})
+
+test("durations accept descending ASCII units within the safe timer limit", () => {
+  assert.equal(parseDuration("30m"), 1_800_000)
+  assert.equal(parseDuration("1h"), 3_600_000)
+  assert.equal(parseDuration("1h30m"), 5_400_000)
+  assert.equal(parseDuration("1d2h3m4s"), 93_784_000)
+  for (const value of ["", "30", "m", "1h1h", "30m1h", "1h 30m", "-1h", "1H", "\u0661h", "25d", "99999999999999999999s"])
+    assert.equal(parseDuration(value), undefined, value)
 })
 
 test("RPC control inputs accept only allowlisted metadata and receive a local deadline", () => {
@@ -21,7 +34,16 @@ test("RPC control inputs accept only allowlisted metadata and receive a local de
     { requestID: "r1", sessionID: "ses_1", action: "start", deadlineAt: now + 5000 })
   for (const value of [undefined, null, [], { requestID: "r1", sessionID: "ses_1", action: "pause" },
     { requestID: "r1", sessionID: "../x", action: "stop" }, { requestID: "r1", sessionID: "ses_1", action: "stop", prompt: "secret" },
-    { requestID: "r".repeat(129), sessionID: "ses_1", action: "stop" }]) assert.equal(controlRequest(value, now), undefined)
+    { requestID: "r".repeat(129), sessionID: "ses_1", action: "stop" },
+    { requestID: "r1", sessionID: "ses_1", action: "start", durationMs: 30_000 },
+    { requestID: "r1", sessionID: "ses_1", action: "extend", durationMs: 0 },
+    { requestID: "r1", sessionID: "ses_1", action: "extend", durationMs: 1.5 },
+    { requestID: "r1", sessionID: "ses_1", action: "extend", durationMs: 2 ** 31 },
+    { requestID: "r1", sessionID: "ses_1", action: "extend", durationMs: "30m" }]) assert.equal(controlRequest(value, now), undefined)
+  assert.deepEqual(controlRequest({ requestID: "r1", sessionID: "ses_1", action: "extend" }, now),
+    { requestID: "r1", sessionID: "ses_1", action: "extend", deadlineAt: now + 5000 })
+  assert.deepEqual(controlRequest({ requestID: "r1", sessionID: "ses_1", action: "extend", durationMs: 30_000 }, now),
+    { requestID: "r1", sessionID: "ses_1", action: "extend", deadlineAt: now + 5000, durationMs: 30_000 })
 })
 
 test("duplicate request IDs apply once, and mismatched duplicates are rejected", async () => {
@@ -33,6 +55,10 @@ test("duplicate request IDs apply once, and mismatched duplicates are rejected",
   assert.equal(await server.receive(first), "stopped")
   assert.equal(await server.receive({ ...first, action: "start" }), "busy")
   assert.equal(applied, 1)
+  const extend = controlRequest({ requestID: "extend", sessionID: "root", action: "extend", durationMs: 30_000 })!
+  assert.equal(await server.receive(extend), "stopped")
+  assert.equal(await server.receive({ ...extend, durationMs: 60_000 }), "busy", "a duplicate with another duration is rejected")
+  assert.equal(applied, 2)
 })
 
 test("actions are ordered per session while independent roots proceed", async () => {

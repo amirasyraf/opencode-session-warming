@@ -5,7 +5,7 @@ import { abortableFetch, errorDetails } from "./diagnostics.ts"
 import type { Diagnostic } from "./diagnostics.ts"
 import { capture } from "./adapters.ts"
 import type { ModelContext, Replay } from "./adapters.ts"
-import { initialProfile, LEGACY_INTERVAL_MS, resolvePolicy } from "./cache-policy.ts"
+import { initialProfile, LEGACY_INTERVAL_MS, MAX_TIMER, resolvePolicy } from "./cache-policy.ts"
 import type { CacheProfile, Settings } from "./cache-policy.ts"
 import type { Observation, Transport } from "./transport.ts"
 import type { Mark, Phase, UsageStats, WarmStatus } from "./status.ts"
@@ -42,6 +42,8 @@ type State = {
   warm?: AbortController
   finishWarm?: (value: Diagnostic) => void
   windowID?: string
+  /** Current window length: the configured duration plus explicit user extensions. */
+  durationMs: number
   metadata: { ordinaryCallID?: string; userMessageID?: string; configuredModelID?: string }
   pending?: Observation
   warms: number
@@ -148,6 +150,7 @@ export class WarmingEngine {
       ...state.metadata, providerID: state.context.providerID, model: state.context.modelID, reason: "user-start" })
     const now = this.clock.now()
     state.startedAt = now
+    state.durationMs = this.config.durationMs
     state.expiresAt = now + this.config.durationMs
     state.nextAt = now + state.policy.intervalMs
     state.warms = 0; state.completed = 0; state.failed = 0; state.usage = undefined; state.marks = []
@@ -161,6 +164,27 @@ export class WarmingEngine {
     this.emit({ event: "warming-started", sessionID, reason: "user-start", windowID: state.windowID,
       ...state.metadata, providerID: state.context.providerID, model: state.context.modelID })
     return "started"
+  }
+
+  /**
+   * Lengthen the live window without renewing it: window identity, snapshot, statistics, next warm target,
+   * and manual-stop state are preserved. Expired or invalidated state is never resurrected.
+   */
+  extendWarming(sessionID: string, requestedDurationMs?: number): ControlResult {
+    if (this.disposed) return "unavailable"
+    if (this.suspended) return "native-warming"
+    const state = this.states.get(sessionID)
+    if (!state || !this.clockCurrent(sessionID, state)) return "awaiting-activity"
+    const durationMs = requestedDurationMs ?? this.config.durationMs
+    if (!Number.isSafeInteger(durationMs) || durationMs <= 0 || state.durationMs > MAX_TIMER - durationMs) return "duration-limit"
+    state.durationMs += durationMs
+    state.expiresAt = state.expiresAt! + durationMs
+    this.schedule(sessionID, state)
+    this.notify(sessionID, state, state.active ? "generating" : state.warm ? "sending" : state.snapshot ? "waiting" : "preparing")
+    this.emit({ event: "warming-extended", sessionID, reason: "user-extend", windowID: state.windowID,
+      ...state.metadata, providerID: state.context.providerID, model: state.context.modelID,
+      durationMs, expiresAt: state.expiresAt })
+    return "extended"
   }
 
   forget(sessionID: string) {
@@ -190,7 +214,7 @@ export class WarmingEngine {
       this.inactive(sessionID, "configured-off", context); return
     }
     const state: State = { context, policy, metadata, token: randomUUID(), attempt: 0, warms: 0, active: false,
-      startedAt: this.clock.now(), completed: 0, failed: 0, marks: [] }
+      durationMs: this.config.durationMs, startedAt: this.clock.now(), completed: 0, failed: 0, marks: [] }
     this.states.set(sessionID, state)
     // Also expire preparation that never reaches the HTTP transport.
     state.expiresAt = this.clock.now() + this.config.durationMs
@@ -240,7 +264,7 @@ export class WarmingEngine {
     this.notify(sessionID, { context, policy: { enabled: false,
       intervalMs: this.config.intervalMs ?? LEGACY_INTERVAL_MS, intervalSource: "automatic", ttlEvidence: "upstream-assumed" },
       token: "", metadata: {}, attempt: 0, warms: 0, active: false, startedAt: this.clock.now(),
-      expiresAt: 0, completed: 0, failed: 0, marks: [] }, reason === "awaiting-activity" ? "idle" : "stopped", reason)
+      expiresAt: 0, durationMs: this.config.durationMs, completed: 0, failed: 0, marks: [] }, reason === "awaiting-activity" ? "idle" : "stopped", reason)
   }
 
   private notify(sessionID: string, state: State, phase: Phase, reason?: string) {
@@ -249,7 +273,7 @@ export class WarmingEngine {
     if (stoppedAt !== undefined) { phase = "stopped"; reason = "user-stop" }
     try {
       this.observer?.({ sessionID, phase, startedAt: state.startedAt, expiresAt: state.expiresAt ?? 0,
-        intervalMs: state.policy.intervalMs, durationMs: this.config.durationMs,
+        intervalMs: state.policy.intervalMs, durationMs: state.durationMs,
         providerID: state.context.providerID || undefined, model: state.context.modelID || undefined,
         adapterID: state.snapshot?.adapterID, strategy: state.snapshot?.strategy,
         ttlMs: state.policy.ttlMs, ttlEvidence: state.policy.ttlEvidence, intervalSource: state.policy.intervalSource,
@@ -302,7 +326,8 @@ export class WarmingEngine {
     state.failed = 0
     state.usage = undefined
     state.marks = []
-    state.expiresAt = now + this.config.durationMs
+    state.durationMs = this.config.durationMs
+    state.expiresAt = now + state.durationMs
     const result = capture(state.context, url, init)
     if (!result.replay) {
       this.emit({ event: "skipped", sessionID, windowID: state.windowID, ...state.metadata,

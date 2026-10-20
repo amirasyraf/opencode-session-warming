@@ -16,7 +16,9 @@ export const WarmingRpc = {
     control: {
       input: {
         type: "object",
-        properties: { requestID: id, sessionID: id, action: { enum: ["start", "stop"] } },
+        // `durationMs` is only meaningful (and only accepted by the handler) for `extend`.
+        properties: { requestID: id, sessionID: id, action: { enum: ["start", "stop", "extend"] },
+          durationMs: { type: "integer", minimum: 1, maximum: 2_147_483_647 } },
         required: ["requestID", "sessionID", "action"],
         additionalProperties: false,
       },

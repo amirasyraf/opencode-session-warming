@@ -45,6 +45,12 @@ test("OpenCode V2 warms a blocked root over HTTP, keeps history clean, and honou
     assert.notEqual(fresh.manualStopped, true)
     await waitFor(() => warms(id).length > afterStop, "warming after manual start")
     assert.equal(JSON.stringify(await api("GET", `/api/session/${id}/message`)), history, "start writes no history")
+    assert.equal((await rpc("control", { requestID: "runtime-extend", sessionID: id, action: "extend", durationMs: 1000 })).result, "extended")
+    const extended = (await rpc("status", { sessionID: id })).status as { expiresAt: number; startedAt: number; durationMs: number }
+    assert.equal(extended.durationMs, 7000)
+    assert.equal(extended.startedAt, fresh.startedAt, "extension keeps the window")
+    assert.equal(extended.expiresAt - extended.startedAt, 7000)
+    assert.equal(JSON.stringify(await api("GET", `/api/session/${id}/message`)), history, "extend writes no history")
 
     const cancelled = await server.rootSession("cancellation")
     await api("POST", `/api/session/${cancelled}/prompt`, { text: "integration-parent: delegate to the explore subagent and wait" })
@@ -57,14 +63,22 @@ test("OpenCode V2 warms a blocked root over HTTP, keeps history clean, and honou
     const log = await readFile(join(state, "plugin.log"), "utf8")
     assert.match(log, /\[session-warming\] ready/)
     assert.match(log, /\[session-warming\] warm-completed/)
-    const segments = await readdir(join(state, "events"))
-    assert.ok(segments.length > 0, "journal segments written")
-    const journal = (await Promise.all(segments.map((name) => readFile(join(state, "events", name), "utf8")))).join("")
+    const readJournal = async () => {
+      const segments = await readdir(join(state, "events"))
+      assert.ok(segments.length > 0, "journal segments written")
+      return (await Promise.all(segments.map((name) => readFile(join(state, "events", name), "utf8")))).join("")
+    }
+    // The journal flushes asynchronously (one-second buffer), so wait for the control records to land.
+    await waitFor(async () => /"event":"warming.user-extended"/.test(await readJournal()), "journal records the extension", 10000)
+    const journal = await readJournal()
     for (const secret of ["integration-only", "never-use-this", "integration-parent", KEEPALIVE]) {
       assert.equal(log.includes(secret), false, `plugin log leaks ${secret}`)
       assert.equal(journal.includes(secret), false, `journal leaks ${secret}`)
     }
     assert.match(journal, /"event":"ordinary.step-usage"/)
+    const extendedRecord = journal.split("\n").filter(Boolean).map((line) => JSON.parse(line)).find((record) => record.event === "warming.user-extended")
+    assert.equal(extendedRecord.reason, "user-extend")
+    assert.equal(extendedRecord.durationMs, 1000)
   } catch (error) {
     throw new Error(`Runtime integration failed: ${String(error)}\n${server.logs.text}`, { cause: error })
   } finally { await server.stop() }

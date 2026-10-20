@@ -163,7 +163,9 @@ export default {
       if (!info) return "unavailable"
       if (info.parentID) return "not-root"
       bounded(roots, request.sessionID, true)
-      return request.action === "stop" ? engine.stop(request.sessionID) : engine.startWarming(request.sessionID)
+      if (request.action === "stop") return engine.stop(request.sessionID)
+      if (request.action === "extend") return engine.extendWarming(request.sessionID, request.durationMs)
+      return engine.startWarming(request.sessionID)
     })
 
     const registration = await ctx.rpc.register(WarmingRpc, {
