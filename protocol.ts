@@ -1,15 +1,16 @@
 import { Buffer } from "node:buffer"
 import { WarmingFailure } from "./diagnostics.ts"
 
-export const CAPTURE_HEADER = "x-opencode-session-warming"
 export const CODEX_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"
 export const KEEPALIVE = "Do not perform any work. Do not use tools. Reply with exactly: OK"
-const MAX_BODY_BYTES = 16 * 1024 * 1024
+export const MAX_BODY_BYTES = 16 * 1024 * 1024
 const MAX_FRAME_BYTES = 1024 * 1024
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
 type ObjectValue = Record<string, unknown>
-export type Snapshot = { url: string; headers: Headers; body: ObjectValue }
+/** Request content encodings the transport can decode for capture and re-apply for replay. */
+export type Encoding = "zstd" | "gzip"
+export type Snapshot = { url: string; headers: Headers; body: ObjectValue; encoding?: Encoding }
 export type Usage = { inputTokens?: number; uncachedInputTokens?: number; cachedTokens?: number; outputTokens?: number; cacheWriteTokens?: number;
   cacheWrite5mTokens?: number; cacheWrite1hTokens?: number; outputLimitReached?: boolean }
 export type ResponseContract = { protocol?: "responses" | "messages"; strict?: boolean; outputLimited?: boolean }
@@ -61,6 +62,11 @@ function inputItemReason(value: unknown): string | undefined {
     return summaryOK && (value.encrypted_content === undefined || typeof value.encrypted_content === "string")
       ? undefined : "unsupported-input-reasoning"
   }
+  if (value.type === "compaction") {
+    // Provider-issued compaction summaries are opaque inline input, not a server-side state reference.
+    return typeof value.encrypted_content === "string" && (value.id === undefined || value.id === null || typeof value.id === "string") &&
+      Object.keys(value).every((key) => ["type", "id", "encrypted_content"].includes(key)) ? undefined : "unsupported-input-compaction"
+  }
   if (value.type === "configuration_update") {
     return object(value.reasoning) && typeof value.reasoning.effort === "string" &&
       Object.keys(value).every((key) => ["type", "reasoning"].includes(key)) &&
@@ -108,21 +114,39 @@ function messageContent(value: unknown, role: unknown, nested = false): string |
   }
 }
 
+/** Declarative function tools, optionally grouped in V2 namespaces. Hosted tools stay unsupported. */
+function responsesTool(tool: unknown, strict: boolean, nested = false): boolean {
+  if (!object(tool)) return false
+  if (tool.type === "namespace" && !nested) {
+    return typeof tool.name === "string" && (tool.description === undefined || typeof tool.description === "string") &&
+      Array.isArray(tool.tools) && tool.tools.every((item) => responsesTool(item, strict, true)) &&
+      Object.keys(tool).every((key) => ["type", "name", "description", "tools"].includes(key))
+  }
+  return tool.type === "function" && typeof tool.name === "string" && object(tool.parameters) &&
+    (!strict || Object.keys(tool).every((key) => ["type", "name", "description", "parameters", "strict"].includes(key)))
+}
+
 const responsesFields = new Set(["model", "input", "instructions", "tools", "tool_choice", "parallel_tool_calls", "reasoning", "text",
   "stream", "store", "max_output_tokens", "temperature", "top_p", "metadata", "service_tier", "safety_identifier", "user",
   "prompt_cache_key", "prompt_cache_retention", "prompt_cache_options", "include", "truncation", "background", "stream_options"])
 const messagesFields = new Set(["model", "messages", "system", "tools", "tool_choice", "thinking", "output_config", "max_tokens",
   "stream", "temperature", "top_p", "top_k", "stop_sequences", "metadata", "service_tier", "cache_control"])
 
-/** Endpoints are supplied only by registered adapters; ordinary request data is never mutated. */
-export function classifyRequest(url: string, init: RequestInit, contract: { endpoint?: string; protocol?: "responses" | "messages"; strict?: boolean } = {}):
+/**
+ * Endpoints are supplied only by registered adapters; ordinary request data is never mutated. The transport
+ * supplies already-decoded JSON text; a `content-encoding` header records how the replay must be re-encoded.
+ */
+export function classifyRequest(url: string, init: RequestInit, contract: { endpoint?: string | readonly string[]; protocol?: "responses" | "messages"; strict?: boolean } = {}):
   { snapshot: Snapshot; reason?: never } | { snapshot?: never; reason: string } {
-  if (url !== (contract.endpoint ?? CODEX_ENDPOINT)) return { reason: "unsupported-endpoint" }
+  const endpoints = contract.endpoint === undefined ? [CODEX_ENDPOINT] : typeof contract.endpoint === "string" ? [contract.endpoint] : contract.endpoint
+  if (!endpoints.includes(url)) return { reason: "unsupported-endpoint" }
   if (init.method?.toUpperCase() !== "POST") return { reason: "unsupported-method" }
   if (typeof init.body !== "string") return { reason: "unsupported-body-type" }
   if (init.body.length > MAX_BODY_BYTES || Buffer.byteLength(init.body, "utf8") > MAX_BODY_BYTES) return { reason: "request-too-large" }
   try {
     const headers = new Headers(init.headers)
+    const encoding = headers.get("content-encoding")?.trim().toLowerCase() || undefined
+    if (encoding !== undefined && encoding !== "zstd" && encoding !== "gzip") return { reason: "unsupported-content-encoding" }
     if (!headers.get("authorization")?.startsWith("Bearer ")) return { reason: "missing-bearer-auth" }
     if (!headers.get("content-type")?.includes("application/json")) return { reason: "unsupported-content-type" }
     const body: unknown = JSON.parse(init.body)
@@ -158,9 +182,8 @@ export function classifyRequest(url: string, init: RequestInit, contract: { endp
       if (!Array.isArray(body.input)) return { reason: "unsupported-input" }
       const inputReason = body.input.map(inputItemReason).find((reason) => reason !== undefined)
       if (inputReason) return { reason: inputReason }
-      if (body.tools !== undefined && (!Array.isArray(body.tools) || !body.tools.every((tool) =>
-        object(tool) && tool.type === "function" && typeof tool.name === "string" && object(tool.parameters) &&
-        (!contract.strict || Object.keys(tool).every((key) => ["type", "name", "description", "parameters", "strict"].includes(key)))))) return { reason: "unsupported-tools" }
+      if (body.tools !== undefined && (!Array.isArray(body.tools) ||
+        !body.tools.every((tool) => responsesTool(tool, !!contract.strict)))) return { reason: "unsupported-tools" }
       if (contract.strict && body.max_output_tokens !== undefined && (!Number.isSafeInteger(body.max_output_tokens) || Number(body.max_output_tokens) <= 0)) return { reason: "unsupported-output-limit" }
       if (contract.strict && body.prompt_cache_options !== undefined && (!object(body.prompt_cache_options) ||
         Object.keys(body.prompt_cache_options).some((key) => !["mode", "ttl", "prewarm"].includes(key)) ||
@@ -172,12 +195,12 @@ export function classifyRequest(url: string, init: RequestInit, contract: { endp
           object(part) && object(part.prompt_cache_breakpoint) && part.prompt_cache_breakpoint.mode === "explicit"))) return { reason: "cache-disabled" }
     }
     if (contract.strict && Object.keys(body).some((key) => !(contract.protocol === "messages" ? messagesFields : responsesFields).has(key))) return { reason: "unsupported-request-field" }
-    headers.delete(CAPTURE_HEADER)
+    headers.delete("content-encoding")
     headers.delete("content-length")
     headers.delete("transfer-encoding")
     headers.delete("connection")
     headers.delete("idempotency-key")
-    return { snapshot: { url, headers, body } }
+    return { snapshot: { url, headers, body, ...(encoding ? { encoding: encoding as Encoding } : {}) } }
   } catch {
     return { reason: "invalid-json-or-headers" }
   }
@@ -187,19 +210,25 @@ export function captureRequest(url: string, init: RequestInit): Snapshot | undef
   return classifyRequest(url, init).snapshot
 }
 
+/** Re-apply the ordinary request's content encoding so replays keep the provider's accepted body format. */
+export function encodedRequest(snapshot: Snapshot, body: Record<string, unknown>, signal: AbortSignal): RequestInit {
+  const headers = new Headers(snapshot.headers)
+  const text = JSON.stringify(body)
+  if (!snapshot.encoding) return { method: "POST", headers, body: text, signal, redirect: "error" }
+  const zlib = globalThis.process?.getBuiltinModule?.("node:zlib") as typeof import("node:zlib") | undefined
+  const encoded = snapshot.encoding === "zstd" ? zlib?.zstdCompressSync?.(text) : zlib?.gzipSync(text)
+  if (!encoded) throw new WarmingFailure("unsupported-content-encoding")
+  headers.set("content-encoding", snapshot.encoding)
+  return { method: "POST", headers, body: new Uint8Array(encoded), signal, redirect: "error" }
+}
+
 export function warmRequest(snapshot: Snapshot, signal: AbortSignal): RequestInit {
-  return {
-    method: "POST",
-    headers: new Headers(snapshot.headers),
-    body: JSON.stringify({
-      ...snapshot.body,
-      input: [...snapshot.body.input as unknown[], { role: "user", content: [{ type: "input_text", text: KEEPALIVE }] }],
-      tool_choice: "none",
-      store: false,
-    }),
-    signal,
-    redirect: "error",
-  }
+  return encodedRequest(snapshot, {
+    ...snapshot.body,
+    input: [...snapshot.body.input as unknown[], { role: "user", content: [{ type: "input_text", text: KEEPALIVE }] }],
+    tool_choice: "none",
+    store: false,
+  }, signal)
 }
 
 function finiteToken(value: unknown): number | undefined {

@@ -1,0 +1,17 @@
+{
+  // Optional: only needed to change TUI options. Merge into ~/.config/opencode/cli.json.
+  // Use the same checkout directory as the opencode.jsonc entry; the explicit entry replaces
+  // the automatically loaded one, so the indicator is never registered twice.
+  "plugins": [
+    {
+      "package": "/absolute/path/to/opencode-session-warming",
+      "options": {
+        "enabled": true,
+        "color": true,
+        "showNextTimer": true,
+        "showRemainingTimer": true
+        // Optional: "maxSegments": 15
+      }
+    }
+  ]
+}

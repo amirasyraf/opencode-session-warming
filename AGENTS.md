@@ -2,39 +2,59 @@
 
 ## Read first
 
-This repository contains two OpenCode v1.18.x plugins:
+This repository is one OpenCode V2 (2.1.x only) local plugin directory:
 
-- `plugin.ts` is the server plugin.
-- `tui.tsx` is the TUI plugin.
+- `server.ts` is the server plugin (`{ id: "session-warming", setup }`, Promise API).
+- `tui.tsx` is the CLI plugin (`{ id: "session-warming.tui", setup }`).
+- `rpc.ts` is the shared JSON-Schema plugin RPC contract between them.
 
-They load from separate OpenCode config files. `README.md` is for humans: keep
-it short, task-oriented, and free of internal implementation contracts.
-`opencode.jsonc.example` and `tui.json.example` are the versioned configuration
-references; update them when the supported config surface changes.
+OpenCode resolves these entrypoints from the configured directory (`plugins`
+entries must name the directory, not a file). The CLI auto-loads `tui.tsx` for a
+server-configured directory; an explicit `cli.json` entry for the same directory
+only supplies options. V1 (1.18.x) is unsupported on this branch; do not add V1
+`server()` exports. Runtime imports of `@opencode/plugin` or `effect` are
+forbidden (the host refuses them from plugin `node_modules`); use type-only
+imports. `README.md` is for humans: keep it short, task-oriented, and free of
+internal implementation contracts. `opencode.jsonc.example` and
+`cli.json.example` are the versioned configuration references; update them when
+the supported config surface changes.
 This file is for coding agents: put precise invariants and verification rules
 here instead of expanding the README.
 
 ## Scope
 
 The plugin warms root-session OpenAI API/Codex OAuth and GitHub Copilot HTTP
-requests. Supported paths are API/Copilot GPT-5.6+ Responses, Copilot Sonnet /
-Opus 5+ Messages, and legacy Codex. Other providers, Chat Completions,
-enterprise/custom endpoints, native LLM execution, WebSockets, provider-hosted
-tools, and stateful provider conversations are unsupported. Do not silently
-enable a transport or change user credentials.
+requests. Supported paths are API/Copilot GPT-5.6+ (including GPT-6.x)
+Responses, Copilot Sonnet / Opus 5+ Messages, and legacy Codex. Other
+providers, Chat Completions, enterprise/custom endpoints, WebSockets,
+provider-hosted tools, and stateful provider conversations are unsupported. Do
+not silently enable or force a transport, and never change user credentials or
+provider settings: OpenAI warming requires the user's own
+`providers.openai.settings.transport: "http"`; WebSocket use is only observed
+(`experimental.ws.handshake`, no mutation) and reported as
+`websocket-transport`.
+
+Never depend on, enable, or run alongside OpenCode's native warming
+(`opencode.warming`, config key `warming`). Never call `session.generate`. The
+server cannot read config, so the CLI checks `config.get` for the session's
+location (`Config.latest` semantics) and reports it through the `native` RPC;
+the server then suspends all warming in that instance (`native-warming`) until
+told otherwise. Without a CLI attached this check cannot run; document, do not
+guess from `generate` traffic (`/btw` uses it too).
 
 Keep responsibilities in their current modules:
 
-- `transport.ts`: one process-wide fetch shim; ordinary traffic preservation.
+- `transport.ts`: hook-side request decoding (zstd/gzip), response-body observation, capture registrations, late-bound replay fetch. No global fetch shim.
 - `protocol.ts`: bounded request validation and Responses/Messages parsing.
 - `adapters.ts`: explicit provider endpoints and replay policy.
 - `cache-policy.ts`: model floors, defaults, overrides, and precedence.
 - `engine.ts`: scheduling, invalidation, retries, and warm lifecycle.
-- `status.ts`, `indicator.ts`, `tui.tsx`: UI publication, observational rendering, and explicit TUI command handling.
-- `controls.ts`: bounded, metadata-only request/acknowledgement envelopes and control delivery.
+- `server.ts`: V2 hook registration, root/model resolution, session events, RPC handlers.
+- `status.ts`, `indicator.ts`, `tui.tsx`: in-memory status registry, observational rendering, and explicit CLI command handling.
+- `controls.ts`, `rpc.ts`: bounded, metadata-only control requests and the RPC contract.
 - `journal-schema.ts`, `journal.ts`, `journal-reader.ts`, `journal-cli.ts`:
   allowlisted metadata persistence and read-only inspection.
-- `ordinary-observer.ts`: live root usage attribution without history reads.
+- `ordinary-observer.ts`: live root usage attribution from `session.step.*` events without history reads.
 
 Do not replace this with a generic provider framework, persistent conversation
 store, background daemon, task counter, or conversation reconstruction layer.
@@ -42,27 +62,47 @@ store, background daemon, task counter, or conversation reconstruction layer.
 ## Transport and session invariants
 
 - Ordinary requests keep their authentication, routing, bytes, cancellation,
-  response metadata, body backpressure, and response identity.
-- Capture only requests bearing the plugin's opaque marker. Remove that marker
-  before transmission, including late requests after disposal.
-- Capture failures must fail open and never break an ordinary request.
+  response status/headers, and body backpressure. The `http.request` hook only
+  reads a bounded clone of the body and never reassigns `event.request`; the
+  `http.response` hook replaces only the body stream with a pull-through
+  observer.
+- Capture only `kind: "primary"` requests of a root session with a live
+  preparation from the `context` hook (or the recovery path below), scoped to
+  the `openai` and `github-copilot` providers. Correlate request and response
+  by session ID, not object identity: later plugins may replace the request.
+- Decode `content-encoding: zstd|gzip` with bounded output (16 MiB); replays
+  re-apply the same encoding (the ChatGPT backend rejects large plain bodies).
+- Capture failures must fail open and never break an ordinary request; hook
+  callbacks must not throw.
 - Warming uses independent HTTP calls. Never use `session.prompt`, session
   history writes, agent/tool execution, or OAuth refresh.
 - Only root sessions warm. New ordinary root-model activity invalidates old
   warming even when the new provider, model, or request is unsupported.
   Child activity is independent.
-- If a root-model request reaches `chat.headers` without a live matching
-  preparation, the hook may recover preparation from session metadata so a
-  resumed request can start a fresh window after expiry. Never use this path
-  for children, hidden agents, compaction, or unsupported models.
-- Raw transport completion, not `session.busy` or processed stream completion,
+- Every `context` hook (each agent-loop model request, any provider) is
+  ordinary activity: invalidate first, then resolve root status
+  (`session.get`, cached) and the provider API model ID (`model.list`
+  `modelID`, cached; catalog aliases such as `gpt-6.1-sol-fast` map to
+  `gpt-6.1-sol`) within the 5 s metadata deadline. `compaction`, `title`, and
+  `generate` kinds never capture; `compaction` invalidates.
+- If a primary root request reaches `http.request` without a live preparation
+  (retry after expiry, HTTP fallback after a WebSocket handshake), it may
+  re-prepare from the cached root/model resolution of the same session and
+  catalog model. Never use this path for children or unsupported models.
+- Raw transport completion (the observed response body), not session status,
   decides when the parent is still generating.
-- Agent cancellation (`MessageAbortedError`) does not invalidate warming or
-  expiry recovery. Ordinary transport abort/body cancellation admits the
-  validated outgoing snapshot for replay without proving response completion
-  or extending the original deadline. Other transport failures remain failures.
+- Agent cancellation (`session.execution.interrupted`) does not invalidate
+  warming; a pending ordinary capture completes as `ordinary-aborted` and stays
+  replayable without proving response completion or extending the deadline.
+  `session.execution.failed` invalidates (`session-error`).
+- Revert (`session.revert.*`), compaction (`session.compaction.started|ended`),
+  and deletion events invalidate; only roots this instance classified are
+  affected.
 - Reject conversation-state references, provider-hosted tools, unimplemented
-  input types, unsupported media, and request bodies over 16 MiB.
+  input types, unsupported media, and request bodies over 16 MiB. V2 Responses
+  `compaction` items (opaque `encrypted_content`), `namespace` tool groups of
+  plain function tools, and `function_call.namespace` are admitted and
+  replayed verbatim.
 - Preserve the complete provider input chain, including file attachments, in
   the replay. Do not strip, reconstruct, or relocate attachment content.
   Support embedded base64 PNG, JPEG, WebP, and GIF images in user messages and
@@ -104,10 +144,10 @@ store, background daemon, task counter, or conversation reconstruction layer.
 
 ## Session control invariants
 
-- `/warming start`, `/warming stop`, and bare `/warming` execute locally in the TUI. OpenCode 1.18.x native slash actions do not receive arguments; use the high-priority `input.submit` / `prompt.submit` command layer to consume this exact command token before ordinary submission. Invalid arguments stay editable and show usage. Ordinary prompts, other slash commands, shell mode, and dialog inputs fall through unchanged.
-- Rendering remains observational. Only explicit user commands change the engine. Child views target their root parent and label it; the server independently checks root metadata and stable session-version eligibility. Never route controls through `session.command`, `session.prompt`, an agent, or a tool.
-- The control bridge uses namespaced `tui.publish` command events through the existing routed SDK client, not an additional server or filesystem queue. Envelopes allow only action, session ID, request ID, deadline, and an acknowledgement result. Never send editor contents or authenticated snapshots.
-- Require a correlated acknowledgement before success feedback. Client requests expire after five seconds; the server must recheck liveness after asynchronous metadata lookups and before mutation. Order actions per session, bound pending work and deduplication, and fence deletion/disposal. Duplicate request IDs cannot apply an action twice.
+- `/warming start`, `/warming stop`, and bare `/warming` are one V2 keymap command with `slash: { name: "warming", arguments: true }`; the host clears the prompt and passes only the argument text, so invalid arguments show usage (they cannot stay editable). Palette entries exist for the menu, start, and stop.
+- Rendering remains observational. Only explicit user commands change the engine. Child views target their root parent (`data.session.root`) and label it; the server independently checks root metadata. Never route controls through `session.command`, `session.prompt`, `session.generate`, an agent, or a tool.
+- The control and status bridge is the `session-warming` plugin RPC (`status`, `control`, `native` methods; `status` event), called with the root session's `location`. RPC registrations are per location instance. Inputs allow only session ID, request ID, action, and the native flag. Never send editor contents or authenticated snapshots.
+- The RPC response is the correlated acknowledgement. Client calls expire after five seconds; the server assigns its own deadline, rechecks liveness after asynchronous metadata lookups and before mutation, orders actions per session, bounds pending work and deduplication, and fences deletion/disposal. Duplicate request IDs cannot apply an action twice.
 - Manual stop is separate from snapshot validity. Stop aborts warming, retains the snapshot only until its existing expiry, and persists across new ordinary activity in the running instance. Fresh ordinary captures remain admissible while stopped. Deletion and disposal clear the stopped preference; do not silently evict it to enable a session.
 - A manual start of a stopped, live state explicitly opens a new configured-duration window with new window identity and zeroed current-window statistics. Its first warm target is one interval later. Wait for ongoing ordinary transport completion. Starting an already enabled window is a no-op; absent or invalidated captures become enabled/awaiting activity, never reconstructed from history.
 - Expiry, clock gaps, authentication failure, incompatible input, compaction, revert, and other invalidations still release snapshots and pending capture callbacks while manually stopped. Start must not resurrect them or bypass configured policy. Fence warm continuations by controller identity as well as state identity.
@@ -131,25 +171,32 @@ store, background daemon, task counter, or conversation reconstruction layer.
   policy generation or replace a newer startup's policy.
 - Journal cleanup is segment-granular and must preserve damaged, unknown, and
   potentially live files. Do not treat a missing record as permission to delete.
-- Ordinary accounting uses live root OpenAI/Copilot step-finish snapshots, not
-  accumulated assistant cost or latest-step message tokens.
+- Ordinary accounting uses live root OpenAI/Copilot `session.step.ended` /
+  `session.step.failed` token snapshots, attributed to exactly one unconsumed
+  ordinary call of the same session and catalog model; otherwise unattributed.
 - Exclude copied history, synthetic/internal activity, children, title/summary,
   compaction, and unknown eligibility. Preserve outcome amendments and ambiguous
   attribution rather than guessing.
 - Missing usage is unknown. OpenCode-normalized zero is not proof of upstream
   usage. Reported cost has unspecified units, never presumed USD.
-- The status bridge publishes only allowed times, counters, provider/model, policy identifiers, outcome marks, and manual-stop state. Status publication never changes warming, history, or provider requests; explicit controls use the separate allowlisted command envelopes.
+- The status bridge publishes only allowed times, counters, provider/model, policy identifiers, outcome marks, and manual-stop state (`safeStatus` on both sides). Status publication never changes warming, history, or provider requests; explicit controls use the separate `control` RPC method.
+- The journal keeps the V1 location (`$XDG_STATE_HOME/opencode/session-warming/events/`) and schema 1; new reason codes are additive. Do not change the record format without a migration plan for existing history.
 
 ## Diagnostics and UI invariants
 
 - Diagnostics identify failure and retry decisions without raw messages, stacks,
-  prompts, headers, or credentials. Calls are bounded, non-blocking, and safe if
-  the logger rejects or stalls. Fallback output goes to a bounded file, never
-  the TUI terminal.
+  prompts, headers, or credentials. V2 has no plugin logger and the service's
+  stdout is not a log (stdio mode uses it for the handshake), so never use
+  `console.*`: the sink is a private, size-bounded, rotating file
+  (`session-warming/plugin.log`, 2 MiB plus one generation). Calls are bounded,
+  non-blocking, and safe if the sink stalls; failure output goes to the bounded
+  fallback file, never the TUI terminal.
 - Metadata hooks have deadlines. Failed diagnostics must not become session
   errors or unhandled promise rejections.
-- Status writes are atomic, coalesced, and bounded. Missing, stale, or dead-owner
-  status is unavailable. Publication failure must not affect the engine.
+- Status is an in-memory registry (64 sessions, inactive entries expire after
+  an hour), emitted as coalesced RPC events and polled every two seconds by the
+  CLI. RPC failure renders as unavailable. Publication failure must not affect
+  the engine.
 - The bar is a native background fill with no glyphs inside it. Adjacent text
   shows state, request counts, failures, and timers. Preserve the cool-left /
   red-right palette, readable monochrome mode, frozen stopped progress, and both
@@ -160,9 +207,10 @@ store, background daemon, task counter, or conversation reconstruction layer.
   render unavailable values as N/A and omit unsupported metrics. Never turn
   normalized zero into proof of upstream usage, and do not present the ratio or
   token values as proof of cache refresh or as a dollar-cost estimate.
-- Prefer the sidebar section after LSP. Use the prompt-row fallback when the
-  sidebar is hidden, and the bottom-padded fallback for child, permission, and
-  question views without a prompt. Never display duplicate indicators.
+- Prefer the `sidebar.content` slot. Use `prompt.footer.status` when the sidebar
+  is hidden, and `session.composer.top` when neither is mounted (child,
+  permission, and form views). Never display duplicate indicators. A
+  native-warming location renders **Disabled**.
 - Bar width follows available space and does not change with band count.
   Bands follow `ceil(duration / interval)` and group only to fit the terminal or
   an explicit segment cap. Preserve a shorter final interval and fractional
@@ -183,11 +231,19 @@ Complete coherent code, test, and documentation edits before running the
 combined suite. Do not run tests after every small edit. Finish with one review
 of `git status`, `git diff`, and the staged diff.
 
-The unit suite uses fake clocks and mock transports. Do not add live provider
-calls to automated tests. `npm run test:runtime` requires an installed stable
-OpenCode 1.18.x release and isolates HOME/XDG directories with a local mock
-provider. It must never use user accounts or global OpenCode configuration.
-`npm run test:tui` requires Python 3 and a PTY; it may submit locally consumed warming commands, but must not submit model prompts or contact a live provider. Control fixtures must verify unchanged conversation history and acknowledged start/stop behavior.
+The unit suite uses fake clocks, mock transports, and a fake V2 plugin context.
+Do not add live provider calls to automated tests. `npm run test:runtime` and
+`npm run test:tui` require `OPENCODE_BIN` pointing at a private 2.1.x binary
+(for example from `npm pack @opencode/cli-darwin-arm64@2.1.0` into a temp
+directory); never install it globally or into `~/.opencode`. They run a private
+`opencode serve` with isolated HOME/XDG, `OPENCODE_CONFIG_DIR`, `OPENCODE_DB`,
+a fake ChatGPT credential created through the isolated API, and a local mock
+reached only through a fixture plugin (listed after this plugin) plus a dead
+`HTTPS_PROXY`. They must never use user accounts, the shared background
+service, or global OpenCode configuration. `npm run test:tui` requires Python 3
+and a PTY; it may submit locally consumed warming commands, but must not submit
+model prompts or contact a live provider. Control fixtures must verify
+unchanged conversation history and acknowledged start/stop behavior.
 
 When behavior, configuration, support, privacy, or workflow contracts change,
 update both documentation files: explain the user-facing result in `README.md`
@@ -195,7 +251,8 @@ and put the agent-facing constraint in this file. Keep the README readable.
 
 For authorized implementation work, stage only intended files, inspect the
 full staged diff, commit in the repository's style, push the current working
-branch, and leave a clean worktree by default. An explicit user request not
+branch, and leave a clean worktree by default. A user's global instruction not
+to push without a separate request takes precedence. An explicit user request not
 to commit or push overrides this default for that task. Do not amend,
 force-push, deploy, create pull requests, change credentials, or mutate
 unrelated remote state. Never revert unrelated work.

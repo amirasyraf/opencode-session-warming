@@ -1,121 +1,191 @@
 /** @jsxImportSource @opentui/solid */
-import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui"
+import type { Plugin } from "@opencode/plugin/tui"
 import { RGBA } from "@opentui/core"
 import { useTerminalDimensions } from "@opentui/solid"
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js"
-import type { KeyEvent, Renderable, TextareaRenderable } from "@opentui/core"
-import type { CommandContext } from "@opentui/keymap"
-import { createDiagnostics, within } from "./diagnostics.ts"
+import { randomUUID } from "node:crypto"
+import { createDiagnostics, fileSink, within } from "./diagnostics.ts"
 import { barCells, compactLayout, indicator, remaining, uiOptions } from "./indicator.ts"
 import type { Indicator, UiOptions } from "./indicator.ts"
-import { readStatus } from "./status.ts"
+import { safeStatus } from "./status.ts"
 import type { StatusRead, UsageStats } from "./status.ts"
 import { isSupportedOpenCodeVersion } from "./compatibility.ts"
-import { ControlClient, parseWarmingCommand } from "./controls.ts"
+import { CONTROL_TIMEOUT_MS, controlResults, parseWarmingArguments } from "./controls.ts"
 import type { ControlAction, ControlResult } from "./controls.ts"
+import { WarmingRpc } from "./rpc.ts"
+
+type Context = Plugin.Context
+type Location = { directory: string }
+type Root = { id?: string; parent: boolean; location?: Location }
+const STATUS_POLL_MS = 2000
+const STATUS_TIMEOUT_MS = 1500
+const NATIVE_CHECK_MS = 30_000
 
 const controlMessages: Record<ControlResult | "unconfirmed", string> = {
   started: "Warming started with a fresh window.", stopped: "Warming stopped.",
   "already-started": "Warming is already enabled for this window.", "already-stopped": "Warming is already stopped.",
   "awaiting-activity": "Warming enabled. Awaiting supported model activity.",
-  "configured-off": "Warming is disabled by configuration.", unavailable: "Warming controls are unavailable.",
-  "not-root": "Warming controls require a root session.", "unsupported-session": "This session's OpenCode version is unsupported.",
+  "configured-off": "Warming is disabled by configuration.",
+  "native-warming": "OpenCode native warming is configured; this plugin stays suspended.",
+  unavailable: "Warming controls are unavailable.", "not-root": "Warming controls require a root session.",
   busy: "Warming controls are busy. Try again shortly.", expired: "The warming control request expired.",
   unconfirmed: "Warming result not confirmed. Check the indicator before retrying.",
 }
 
-function registerControls(api: TuiPluginApi) {
-  const controls = new ControlClient(async (command, signal) => {
-    const result = await api.client.tui.publish({ body: { type: "tui.command.execute", properties: { command } } }, { signal })
-    if (result.error) throw new Error("control-delivery-failed")
-  })
-  const pending = new Set<string>()
-  let disposed = false
-  const run = async (action: ControlAction, root = rootSession(api)) => {
-    if (!root.id) { api.ui.toast({ message: "Open a session to control warming.", variant: "info" }); return }
-    const sessionID = root.id
-    if (pending.has(sessionID)) { api.ui.toast({ message: "A warming control request is pending.", variant: "info" }); return }
-    pending.add(sessionID)
-    try {
-      const result = await controls.request(action, sessionID)
-      if (!disposed) api.ui.toast({ title: root.parent ? "Parent session warming" : "Warming",
-        message: controlMessages[result], variant: ["started", "stopped", "already-started", "already-stopped", "awaiting-activity"].includes(result) ? "info" : "warning" })
-    } finally { pending.delete(sessionID) }
-  }
-  const menu = async () => {
-    const root = rootSession(api)
-    if (!root.id) { api.ui.toast({ message: "Open a session to control warming.", variant: "info" }); return }
-    const status = await within(() => readStatus(root.id!), 1000, "metadata-timeout").catch(() => ({} as StatusRead))
-    if (disposed || rootSession(api).id !== root.id) return
-    const active = status.status && !status.status.manualStopped && ["preparing", "generating", "waiting", "sending"].includes(status.status.phase) && Date.now() < status.status.expiresAt
-    api.ui.dialog.replace(() => <api.ui.DialogSelect<ControlAction>
-      title={root.parent ? "Parent session warming" : "Session warming"}
-      options={[
-        { title: "Start warming", value: "start", description: "Start a fresh window, or await model activity", disabled: !!active || pending.has(root.id!) },
-        { title: "Stop warming", value: "stop", description: "Keep warming stopped until you start it", disabled: status.status?.manualStopped || pending.has(root.id!) },
-      ]}
-      onSelect={(option) => { api.ui.dialog.clear(); void run(option.value, root) }} />)
-  }
-  const intercept = (context: CommandContext<Renderable, KeyEvent>) => {
-    const editor = api.renderer.currentFocusedEditor as TextareaRenderable | null
-    const traits = editor?.traits as (TextareaRenderable["traits"] & { owner?: string; role?: string }) | undefined
-    if (disposed || !editor || traits?.owner !== "opencode" || traits.role !== "prompt" || traits.status === "SHELL") return false
-    const command = parseWarmingCommand(editor.plainText)
-    if (!command) return false
-    context.event?.preventDefault()
-    context.event?.stopPropagation()
-    if (command === "invalid") {
-      api.ui.toast({ message: "Usage: /warming start or /warming stop", variant: "info" })
-      return
-    }
-    editor.extmarks.clear()
-    editor.clear()
-    if (command === "menu") void menu()
-    else void run(command)
-  }
-  const offCommands = api.keymap.registerLayer({ priority: 100000, commands: [
-    { name: "input.submit", hidden: true, run: intercept },
-    { name: "prompt.submit", hidden: true, run: intercept },
-    { name: "session-warming.menu", namespace: "palette", title: "Session warming", category: "Session", slashName: "warming", run: () => { void menu() } },
-    { name: "session-warming.start", namespace: "palette", title: "Start warming", category: "Session", run: () => { api.ui.dialog.clear(); void run("start") } },
-    { name: "session-warming.stop", namespace: "palette", title: "Stop warming", category: "Session", run: () => { api.ui.dialog.clear(); void run("stop") } },
-  ] })
-  const offEvent = api.event.on("tui.command.execute", (event) => controls.receive(event.properties.command))
-  api.lifecycle.onDispose(() => { disposed = true; offCommands(); offEvent(); controls.dispose(); pending.clear() })
+/** Child views target their root parent; the server independently re-checks root metadata. */
+function rootSession(context: Context, sessionID: string | undefined): Root {
+  if (!sessionID) return { parent: false }
+  let id: string
+  try { id = context.data.session.root(sessionID) } catch { return { parent: false } }
+  const info = context.data.session.get(id)
+  return { id, parent: id !== sessionID, location: info?.location ? { directory: info.location.directory } : undefined }
 }
 
-function rootSession(api: TuiPluginApi, sessionID?: string): { id?: string; parent: boolean } {
-  const route = api.route.current
-  let current = sessionID
-  if (!current) {
-    if (route.name !== "session" || !route.params || typeof route.params.sessionID !== "string") return { parent: false }
-    current = route.params.sessionID
+function currentRoot(context: Context): Root {
+  const route = context.ui.router.current()
+  return route.type === "session" ? rootSession(context, route.sessionID) : { parent: false }
+}
+
+/** Mirrors OpenCode's `Config.latest`: the highest-priority document that sets `warming` wins. */
+function nativeWarming(entries: unknown): boolean {
+  if (!Array.isArray(entries)) return false
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index] as { type?: unknown; info?: { warming?: unknown } }
+    if (entry?.type !== "document" || entry.info?.warming === undefined) continue
+    const value = entry.info.warming
+    return value === true || (typeof value === "object" && value !== null)
   }
-  let id = current
-  const visited = new Set<string>()
-  for (let depth = 0; depth < 8; depth++) {
-    if (visited.has(id)) return { parent: true }
-    visited.add(id)
-    const parent = api.state.session.get(id)?.parentID
-    if (!parent) return { id, parent: id !== current }
-    id = parent
+  return false
+}
+
+function createWarmingClient(context: Context, log: ReturnType<typeof createDiagnostics>) {
+  const rpc = context.client.rpc(WarmingRpc)
+  const [reads, setReads] = createSignal<Record<string, StatusRead>>({})
+  const native = new Map<string, { checkedAt: number; enabled?: boolean }>()
+  const inflight = new Set<string>()
+  let disposed = false
+  const store = (id: string, read: StatusRead) => { if (!disposed) setReads((all) => ({ ...all, [id]: read })) }
+
+  const checkNative = async (location: Location) => {
+    const state = native.get(location.directory)
+    if (state && Date.now() - state.checkedAt < NATIVE_CHECK_MS) return
+    native.set(location.directory, { checkedAt: Date.now(), enabled: state?.enabled })
+    try {
+      const entries = await within((signal) => context.client.config.get({ location }, { signal }), STATUS_TIMEOUT_MS, "metadata-timeout")
+      const enabled = nativeWarming(entries)
+      native.set(location.directory, { checkedAt: Date.now(), enabled })
+      // Idempotent; resent on every check so a restarted server instance learns the current configuration.
+      await within((signal) => rpc.native({ enabled }, { location, signal }), STATUS_TIMEOUT_MS, "metadata-timeout")
+    } catch { /* Indicator falls back to the server's last known state. */ }
   }
-  return { parent: true }
+
+  const refresh = async (root: Root) => {
+    const id = root.id
+    if (disposed || !id || !root.location || inflight.has(id)) return
+    inflight.add(id)
+    void checkNative(root.location)
+    try {
+      const output = await within((signal) => rpc.status({ sessionID: id }, { location: root.location, signal }),
+        STATUS_TIMEOUT_MS, "metadata-timeout") as { status?: unknown; native?: unknown }
+      store(id, { status: safeStatus(output?.status), native: output?.native === true })
+    } catch (error) {
+      const type = (error as { type?: unknown })?.type
+      store(id, { unavailable: type === "rpc.method_not_found" || type === "rpc.unavailable" ? "not-loaded" : "read-failed" })
+    } finally { inflight.delete(id) }
+  }
+
+  const off = rpc.events.on("status", (event) => {
+    const data = event.data as { sessionID?: unknown; status?: unknown }
+    const status = safeStatus(data?.status)
+    if (status && status.sessionID === data.sessionID) store(status.sessionID, { status, native: reads()[status.sessionID]?.native })
+  })
+
+  const control = async (action: ControlAction, root: Root): Promise<ControlResult | "unconfirmed"> => {
+    if (!root.id || !root.location) return "unavailable"
+    try {
+      const output = await within((signal) => rpc.control({ requestID: randomUUID(), sessionID: root.id!, action }, { location: root.location, signal }),
+        CONTROL_TIMEOUT_MS, "metadata-timeout") as { result?: unknown }
+      const result = controlResults.find((value) => value === output?.result)
+      return result ?? "unconfirmed"
+    } catch (error) {
+      log({ event: "ui-status-failed", reason: "control-failed" })
+      const type = (error as { type?: unknown })?.type
+      return type === "rpc.method_not_found" || type === "rpc.unavailable" ? "unavailable" : "unconfirmed"
+    } finally { void refresh(root) }
+  }
+
+  return {
+    read: (id: string | undefined): StatusRead => (id ? reads()[id] : undefined) ?? {},
+    refresh, control,
+    dispose() { disposed = true; off() },
+  }
+}
+
+type WarmingClient = ReturnType<typeof createWarmingClient>
+
+function registerControls(context: Context, client: WarmingClient) {
+  const pending = new Set<string>()
+  let disposed = false
+  const toast = (message: string, variant: "info" | "warning" = "info", title?: string) =>
+    context.ui.toast.show({ ...(title ? { title } : {}), message, variant })
+  const run = async (action: ControlAction, root = currentRoot(context)) => {
+    if (!root.id) { toast("Open a session to control warming."); return }
+    if (pending.has(root.id)) { toast("A warming control request is pending."); return }
+    pending.add(root.id)
+    try {
+      const result = await client.control(action, root)
+      if (!disposed) toast(controlMessages[result], ["started", "stopped", "already-started", "already-stopped", "awaiting-activity"].includes(result)
+        ? "info" : "warning", root.parent ? "Parent session warming" : "Warming")
+    } finally { pending.delete(root.id) }
+  }
+  const menu = async () => {
+    const root = currentRoot(context)
+    if (!root.id) { toast("Open a session to control warming."); return }
+    await client.refresh(root)
+    if (disposed) return
+    const status = client.read(root.id).status
+    const active = status && !status.manualStopped && ["preparing", "generating", "waiting", "sending"].includes(status.phase) && Date.now() < status.expiresAt
+    const action = await context.ui.dialog.select<ControlAction>({
+      title: root.parent ? "Parent session warming" : "Session warming",
+      options: [
+        { title: "Start warming", value: "start", description: "Start a fresh window, or await model activity", disabled: !!active || pending.has(root.id) },
+        { title: "Stop warming", value: "stop", description: "Keep warming stopped until you start it", disabled: status?.manualStopped === true || pending.has(root.id) },
+      ],
+    })
+    if (action && !disposed && currentRoot(context).id === root.id) await run(action, root)
+  }
+  context.keymap.layer(() => ({
+    commands: [
+      {
+        id: "session-warming.menu", title: "Session warming", description: "Show warming controls for this session", group: "Session",
+        palette: true, slash: { name: "warming", arguments: true },
+        // OpenCode clears the prompt before running argument slash commands; nothing else is submitted.
+        run: (input) => {
+          const parsed = parseWarmingArguments(input)
+          if (parsed === "invalid") { toast("Usage: /warming, /warming start, or /warming stop"); return }
+          return parsed === "menu" ? menu() : run(parsed)
+        },
+      },
+      { id: "session-warming.start", title: "Start warming", group: "Session", palette: true, run: () => run("start") },
+      { id: "session-warming.stop", title: "Stop warming", group: "Session", palette: true, run: () => run("stop") },
+    ],
+  }))
+  return () => { disposed = true; pending.clear() }
 }
 
 function blend(a: RGBA, b: RGBA, amount: number): RGBA {
   return RGBA.fromValues(a.r + (b.r - a.r) * amount, a.g + (b.g - a.g) * amount, a.b + (b.b - a.b) * amount)
 }
 
-function Bar(props: { api: TuiPluginApi; options: UiOptions; model: Indicator; width?: number }) {
+function Bar(props: { context: Context; options: UiOptions; model: Indicator; width?: number }) {
   const [measured, setMeasured] = createSignal(0)
   const cells = createMemo(() => barCells(props.model, props.width ?? measured(), props.options.maxSegments))
   const columns = createMemo(() => Array.from({ length: cells().length }, (_, index) => index))
-  const theme = () => props.api.theme.current
+  const theme = () => props.context.theme
   const background = (index: number) => {
-    const track = blend(theme().backgroundPanel, theme().textMuted, 0.16)
+    const track = blend(theme().background.raised.base, theme().text.muted, 0.16)
     const cell = cells()[index]
-    const fill = props.options.color ? RGBA.fromHex(cell.color) : theme().textMuted
+    const fill = props.options.color ? RGBA.fromHex(cell.color) : theme().text.muted
     // Faintly tint future bands; elapsed portions retain their full colour intensity.
     const idle = 0.08
     const shade = cell.segment % 2 ? 0.88 : 1
@@ -129,12 +199,12 @@ function Bar(props: { api: TuiPluginApi; options: UiOptions; model: Indicator; w
   )
 }
 
-function Stat(props: { api: TuiPluginApi; label: string; value: string; warning?: boolean }) {
-  const theme = () => props.api.theme.current
+function Stat(props: { context: Context; label: string; value: string; warning?: boolean }) {
+  const theme = () => props.context.theme
   return (
     <box width="100%" height={1} flexDirection="row" justifyContent="space-between" gap={1}>
-      <text fg={theme().textMuted} wrapMode="none" truncate>{props.label}</text>
-      <text fg={props.warning ? theme().warning : theme().text} flexShrink={0}>{props.value}</text>
+      <text fg={theme().text.muted} wrapMode="none" truncate>{props.label}</text>
+      <text fg={props.warning ? theme().text.feedback.warning.base : theme().text.base} flexShrink={0}>{props.value}</text>
     </box>
   )
 }
@@ -177,16 +247,17 @@ function usageCapabilities(adapterID?: string) {
   return { input: !codex, read: true, write: !codex, hitRate: !codex, output: true }
 }
 
-function View(props: { api: TuiPluginApi; options: UiOptions; sidebar?: boolean; bottom?: boolean }) {
+function View(props: { context: Context; client: WarmingClient; options: UiOptions; sessionID: string; sidebar?: boolean; bottom?: boolean }) {
   const dimensions = useTerminalDimensions()
   const [now, setNow] = createSignal(Date.now())
-  const [status, setStatus] = createSignal<StatusRead>({})
   const [measured, setMeasured] = createSignal<number>()
-  const root = createMemo(() => rootSession(props.api), undefined, { equals: (a, b) => a?.id === b?.id && a?.parent === b?.parent })
+  const root = createMemo(() => rootSession(props.context, props.sessionID),
+    undefined, { equals: (a, b) => a.id === b.id && a.parent === b.parent && a.location?.directory === b.location?.directory })
+  const status = createMemo(() => props.client.read(root().id))
   const model = createMemo(() => indicator(status(), now(), props.options))
   const usage = createMemo(() => {
     const value = status().status?.usage
-    return value ? { value, uncached: uncachedInput(value), hitRate: hitRate(value), cacheWrite: cacheWrite(value) } : undefined
+    return value ? { value, hitRate: hitRate(value), cacheWrite: cacheWrite(value) } : undefined
   })
   const ttl = createMemo(() => {
     const value = status().status
@@ -195,103 +266,88 @@ function View(props: { api: TuiPluginApi; options: UiOptions; sidebar?: boolean;
   const capabilities = createMemo(() => usageCapabilities(status().status?.adapterID))
   const targetWidth = () => props.bottom ? Math.max(0, dimensions().width - 6) : Math.max(0, Math.min(68, Math.floor((dimensions().width - 8) / 2)))
   const layout = createMemo(() => compactLayout(model(), Math.min(targetWidth(), measured() ?? targetWidth()), root().parent))
-  let generation = 0
-  let inFlight = false
-  let refreshQueued = false
-  let disposed = false
-  const refresh = async () => {
-    const id = root().id
-    if (disposed || !id) return
-    if (inFlight) { refreshQueued = true; return }
-    inFlight = true
-    const current = generation
-    try {
-      const value = await within(() => readStatus(id), 1000, "metadata-timeout")
-      if (!disposed && current === generation) setStatus(value)
-    } catch {
-      if (!disposed && current === generation) setStatus({ unavailable: "read-failed" })
-    } finally {
-      inFlight = false
-      if (refreshQueued && !disposed) { refreshQueued = false; void refresh() }
-    }
-  }
-  createEffect(() => {
-    root().id
-    generation++
-    setStatus({})
-    void refresh()
-  })
-  const timer = setInterval(() => { setNow(Date.now()); void refresh() }, 500)
-  timer.unref()
-  onCleanup(() => { disposed = true; generation++; clearInterval(timer) })
-  const theme = () => props.api.theme.current
-  const warning = () => props.options.color && (model().state === "Stopped" || model().state === "Unavailable")
+  createEffect(() => { void props.client.refresh(root()) })
+  let polled = 0
+  const timer = setInterval(() => {
+    setNow(Date.now())
+    if (Date.now() - polled >= STATUS_POLL_MS) { polled = Date.now(); void props.client.refresh(root()) }
+  }, 500)
+  timer.unref?.()
+  onCleanup(() => clearInterval(timer))
+  const theme = () => props.context.theme
+  const warning = () => props.options.color && ["Stopped", "Unavailable", "Disabled"].includes(model().state)
+  const warn = () => theme().text.feedback.warning.base
   return (
     <Show when={props.sidebar} fallback={
       <box width={targetWidth()} minWidth={0} flexShrink={1} height={props.bottom ? 2 : 1}
         marginLeft={props.bottom ? 3 : 0} paddingBottom={props.bottom ? 1 : 0} flexDirection="row" gap={1}
         onSizeChange={function () { setMeasured(this.width) }}>
-        <Show when={layout().title}><text fg={theme().text} flexShrink={0}><b>{layout().title}</b></text></Show>
-        <Show when={layout().barWidth > 0}><Bar api={props.api} options={props.options} model={model()} width={layout().barWidth} /></Show>
-        <Show when={layout().state}><text fg={warning() ? theme().warning : theme().textMuted} wrapMode="none" flexShrink={0}>{layout().state}</text></Show>
+        <Show when={layout().title}><text fg={theme().text.base} flexShrink={0}><b>{layout().title}</b></text></Show>
+        <Show when={layout().barWidth > 0}><Bar context={props.context} options={props.options} model={model()} width={layout().barWidth} /></Show>
+        <Show when={layout().state}><text fg={warning() ? warn() : theme().text.muted} wrapMode="none" flexShrink={0}>{layout().state}</text></Show>
         <For each={layout().fields}>{(field) => (
-          <text width={field.width} fg={field.warning && props.options.color ? theme().warning : theme().text} wrapMode="none" flexShrink={0}>{field.text}</text>
+          <text width={field.width} fg={field.warning && props.options.color ? warn() : theme().text.base} wrapMode="none" flexShrink={0}>{field.text}</text>
         )}</For>
       </box>
     }>
       <box width="100%" flexShrink={0}>
         <box width="100%" height={1} flexDirection="row" justifyContent="space-between" gap={1}>
-          <text fg={theme().text} flexShrink={0}><b>Warming</b></text>
-          <text fg={warning() ? theme().warning : theme().textMuted} wrapMode="none" truncate>{model().state}</text>
+          <text fg={theme().text.base} flexShrink={0}><b>{root().parent ? "Parent warming" : "Warming"}</b></text>
+          <text fg={warning() ? warn() : theme().text.muted} wrapMode="none" truncate>{model().state}</text>
         </box>
-        <Show when={model().hasWindow}><box paddingTop={1} paddingBottom={1}><Bar api={props.api} options={props.options} model={model()} /></box></Show>
-        <Show when={model().detail}><text fg={theme().textMuted} wrapMode="word">{model().detail}</text></Show>
-        <Show when={status().status?.model}><Stat api={props.api} label={status().status?.providerID === "github-copilot" ? "Copilot" : "OpenAI"} value={status().status!.model!} /></Show>
-        <Show when={status().status && ttl() !== undefined}><Stat api={props.api} label="Cache TTL" value={metric(ttl())} /></Show>
-        <Show when={status().status}><Stat api={props.api} label="Next Request" value={metric(model().next)} /></Show>
-        <Show when={status().status}><Stat api={props.api} label="Window Left" value={metric(model().left)} /></Show>
-        <Show when={status().status}><Stat api={props.api} label="Requests Sent" value={String(model().completed ?? 0)} /></Show>
-        <Show when={status().status && capabilities().input}><Stat api={props.api} label="Input Tokens" value={metric(usage()?.value.inputTokens)} /></Show>
-        <Show when={status().status && capabilities().read}><Stat api={props.api} label="Cache Read" value={metric(usage()?.value.cachedTokens)} /></Show>
-        <Show when={status().status && capabilities().write}><Stat api={props.api} label="Cache Write" value={metric(usage()?.cacheWrite)} /></Show>
-        <Show when={status().status && capabilities().hitRate}><Stat api={props.api} label="Cache Hit Rate" value={metric(usage()?.hitRate)} /></Show>
-        <Show when={status().status && capabilities().output}><Stat api={props.api} label="Output Tokens" value={metric(usage()?.value.outputTokens)} /></Show>
-        <Show when={status().status}><Stat api={props.api} label="Failed" value={String(model().failed ?? 0)} warning={props.options.color && !!model().failed} /></Show>
+        <Show when={model().hasWindow}><box paddingTop={1} paddingBottom={1}><Bar context={props.context} options={props.options} model={model()} /></box></Show>
+        <Show when={model().detail}><text fg={theme().text.muted} wrapMode="word">{model().detail}</text></Show>
+        <Show when={status().status?.model}><Stat context={props.context} label={status().status?.providerID === "github-copilot" ? "Copilot" : "OpenAI"} value={status().status!.model!} /></Show>
+        <Show when={status().status && ttl() !== undefined}><Stat context={props.context} label="Cache TTL" value={metric(ttl())} /></Show>
+        <Show when={status().status}><Stat context={props.context} label="Next Request" value={metric(model().next)} /></Show>
+        <Show when={status().status}><Stat context={props.context} label="Window Left" value={metric(model().left)} /></Show>
+        <Show when={status().status}><Stat context={props.context} label="Requests Sent" value={String(model().completed ?? 0)} /></Show>
+        <Show when={status().status && capabilities().input}><Stat context={props.context} label="Input Tokens" value={metric(usage()?.value.inputTokens)} /></Show>
+        <Show when={status().status && capabilities().read}><Stat context={props.context} label="Cache Read" value={metric(usage()?.value.cachedTokens)} /></Show>
+        <Show when={status().status && capabilities().write}><Stat context={props.context} label="Cache Write" value={metric(usage()?.cacheWrite)} /></Show>
+        <Show when={status().status && capabilities().hitRate}><Stat context={props.context} label="Cache Hit Rate" value={metric(usage()?.hitRate)} /></Show>
+        <Show when={status().status && capabilities().output}><Stat context={props.context} label="Output Tokens" value={metric(usage()?.value.outputTokens)} /></Show>
+        <Show when={status().status}><Stat context={props.context} label="Failed" value={String(model().failed ?? 0)} warning={props.options.color && !!model().failed} /></Show>
       </box>
     </Show>
   )
 }
 
-const tui: TuiPlugin = async (api, options = {}) => {
-  const log = createDiagnostics((entry, signal) => api.client.app.log(entry, { signal }))
-  const config = uiOptions(options)
-  if (!config) { log({ event: "disabled", reason: "invalid-ui-options" }); return }
-  if (!config.enabled) return
-  if (!isSupportedOpenCodeVersion(api.app.version)) { log({ event: "disabled", reason: "unsupported-ui-version" }); return }
-  config.color = config.color && process.env.NO_COLOR === undefined
-  registerControls(api)
-  const [sidebars, setSidebars] = createSignal(0)
-  const Sidebar = () => {
-    onMount(() => setSidebars((count) => count + 1))
-    onCleanup(() => setSidebars((count) => count - 1))
-    return <View api={api} options={config} sidebar />
-  }
-  const noPrompt = () => {
-    const route = api.route.current
-    if (route.name !== "session" || !route.params || typeof route.params.sessionID !== "string") return false
-    const id = route.params.sessionID
-    return !!api.state.session.get(id)?.parentID || api.state.session.permission(id).length > 0 || api.state.session.question(id).length > 0
-  }
-  api.slots.register({
-    // OpenCode 1.18.x places LSP at 300 and Todos at 400.
-    order: 350,
-    slots: {
-      sidebar_content: () => <Sidebar />,
-      session_prompt_right: () => <Show when={!sidebars()}><View api={api} options={config} /></Show>,
-      app_bottom: () => <Show when={!sidebars() && noPrompt()}><View api={api} options={config} bottom /></Show>,
-    },
-  })
-  log({ event: "ui-ready", version: api.app.version })
-}
-
-export default { id: "opencode-session-warming-ui", tui } satisfies TuiPluginModule
+export default {
+  id: "session-warming.tui",
+  setup(context: Context) {
+    const log = createDiagnostics(fileSink())
+    const config = uiOptions((context.options ?? {}) as Record<string, unknown>)
+    if (!config) { log({ event: "disabled", reason: "invalid-ui-options" }); return }
+    if (!config.enabled) return
+    if (!isSupportedOpenCodeVersion(context.app.version)) { log({ event: "disabled", reason: "unsupported-opencode-version", version: context.app.version }); return }
+    config.color = config.color && process.env.NO_COLOR === undefined
+    const client = createWarmingClient(context, log)
+    const disposeControls = registerControls(context, client)
+    // Exactly one indicator: sidebar first, then the prompt row, then above the composer when there is no prompt.
+    const [sidebars, setSidebars] = createSignal(0)
+    const [prompts, setPrompts] = createSignal(0)
+    const counted = (set: typeof setSidebars) => { onMount(() => set((count) => count + 1)); onCleanup(() => set((count) => count - 1)) }
+    const offSidebar = context.ui.slot({
+      append: "sidebar.content",
+      render: (input) => { counted(setSidebars); return <View context={context} client={client} options={config} sessionID={input.sessionID} sidebar /> },
+    })
+    const offPrompt = context.ui.slot({
+      append: "prompt.footer.status",
+      render: (input) => (
+        <Show when={input.sessionID}>{(id) => {
+          counted(setPrompts)
+          return <Show when={!sidebars()}><View context={context} client={client} options={config} sessionID={id()} /></Show>
+        }}</Show>
+      ),
+    })
+    const offComposer = context.ui.slot({
+      append: "session.composer.top",
+      render: (input) => (
+        <Show when={!sidebars() && !prompts()}><View context={context} client={client} options={config} sessionID={input.sessionID} bottom /></Show>
+      ),
+    })
+    log({ event: "ui-ready", version: context.app.version })
+    return () => { offSidebar(); offPrompt(); offComposer(); disposeControls(); client.dispose() }
+  },
+} satisfies Plugin.Definition

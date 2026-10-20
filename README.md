@@ -1,8 +1,14 @@
 # OpenCode session warming
 
-An OpenCode v1.18.x plugin that keeps supported root-session prompt prefixes
-warm while OpenCode is waiting on a foreground subagent or long-running tool.
-It also adds a warming indicator and session controls to the TUI.
+An OpenCode V2 (2.1.x) plugin that keeps supported root-session prompt
+prefixes warm while OpenCode is waiting on a foreground subagent or
+long-running tool. It also adds a warming indicator and session controls to the
+terminal UI. This branch targets V2 only; OpenCode 1.18.x is no longer
+supported.
+
+It replays the session's real captured provider request. It does not use, and
+must not run alongside, OpenCode's built-in `warming` setting, which appends a
+keep-alive prompt through `session.generate`. Leave `warming` unset.
 
 Warming sends extra provider requests. They use quota and may cost money.
 Cache retention and savings are not guaranteed. OpenCode must stay running and
@@ -10,44 +16,68 @@ the computer must stay awake and connected.
 
 ## Supported setup
 
-- OpenCode 1.18.x stable releases
-- OpenAI ChatGPT/Codex OAuth over the built-in `openai` provider
+- OpenCode 2.1.x stable releases
+- OpenAI ChatGPT/Codex OAuth over the built-in `openai` provider, with the
+  provider transport set to HTTP (see below)
 - OpenAI API GPT-5.6+ Responses at `api.openai.com/v1/responses`
-- GitHub Copilot GPT-5.6+ Responses
+- GitHub Copilot GPT-5.6+ Responses (unit-tested only on V2)
 - GitHub Copilot Claude Sonnet/Opus 5+ Messages with adaptive or disabled thinking
+  (unit-tested only on V2)
 - Text, ordinary function tools, and the complete provider input chain, including file attachments and embedded base64 PNG/JPEG/WebP/GIF images
 - Root sessions only
 
+GPT-6.x models such as `gpt-6.1-sol` are eligible: model checks are numeric
+(`gpt-5.6` and newer), and catalog aliases such as `gpt-6.1-sol-fast` resolve to
+their provider API model first.
+
 The plugin skips other providers, Copilot enterprise/custom endpoints, Chat
-Completions, WebSockets, native LLM execution, provider-managed conversations,
-hosted tools, audio, remote images, and unsupported request shapes.
-Child activity does not reset the root session's timer.
+Completions, WebSocket traffic, provider-managed conversations, hosted tools,
+audio, remote images, and unsupported request shapes. Child activity does not
+reset the root session's timer.
+
+### OpenAI needs the HTTP transport
+
+OpenCode V2 sends OpenAI traffic over a per-session WebSocket by default. The
+plugin captures ordinary requests through OpenCode's `http.request` /
+`http.response` hooks, which cannot see WebSocket traffic, so it needs:
+
+```jsonc
+{ "providers": { "openai": { "settings": { "transport": "http" } } } }
+```
+
+The plugin does not change the transport itself. Without that setting it
+reports **WebSocket transport** in the indicator and does not warm. The
+tradeoff: over HTTP every step uploads the complete request (zstd-compressed
+for ChatGPT accounts) instead of only the content added since the previous
+step, and the WebSocket connection reuse is lost.
 
 The plugin does not change ordinary authentication, routing, request bytes,
-response metadata, cancellation, or backpressure. It never refreshes OAuth,
-writes session history, runs tools, or calls `session.prompt` for warming.
+response status/headers, cancellation, or backpressure. It never refreshes
+OAuth, writes session history, runs tools, or calls `session.prompt` or
+`session.generate` for warming.
 
 ## Install
 
-The plugin runs directly from the checkout. There is no build step and no
-runtime npm dependency. Use Node 22.18 or newer for the development commands.
+The checkout is a local V2 plugin directory: OpenCode loads `server.ts`, the
+CLI loads `tui.tsx`, and both share the `rpc.ts` contract. There is no build
+step and no runtime npm dependency. Use Node 22.18 or newer for the development
+commands.
 
 1. Clone the repository or use an existing checkout.
-2. Use `opencode.jsonc.example` as a reference, replace the example file URL
-   with the checkout path, and merge its `plugin` entry into
+2. Use `opencode.jsonc.example` as a reference. Merge its `plugins` entry, with
+   `package` set to the absolute checkout directory (a directory, not a file),
+   and the OpenAI `transport: "http"` setting into
    `~/.config/opencode/opencode.jsonc`. Keep your existing entries.
-
-3. To enable the TUI indicator, use `tui.json.example` as a reference, replace
-   the example file URL with the checkout path, and merge its `plugin` entry
-   into `~/.config/opencode/tui.json`.
-
-4. Check the version with `opencode --version`, then fully quit and restart
-   OpenCode.
+3. The CLI loads the indicator automatically from the same directory. To change
+   TUI options, merge the `cli.json.example` entry, using the same directory,
+   into `~/.config/opencode/cli.json`.
+4. Check the version with `opencode --version`, then run
+   `opencode service restart` (or quit and restart OpenCode).
 
 The public repository does not include a project-level `opencode.json`. Your
 local ignored copy can remain in place if you use it for troubleshooting.
 
-The committed `opencode.jsonc.example` and `tui.json.example` files are the
+The committed `opencode.jsonc.example` and `cli.json.example` files are the
 configuration templates. Compare them after pulling changes; if either file
 changes, review the corresponding local OpenCode config. Do not overwrite your
 local config because it may contain other plugins.
@@ -86,7 +116,9 @@ Intervals and durations must be positive safe integers no larger than
 than being silently ignored.
 
 Overrides resolve independently as model, provider, explicit global, then
-automatic policy. Model names are exact API IDs; wildcard matching is not used.
+automatic policy. Model names are exact provider API IDs (for example
+`gpt-6.1-sol`, also for the `gpt-6.1-sol-fast` catalog entry); wildcard
+matching is not used.
 
 Example provider overrides:
 
@@ -114,7 +146,7 @@ Example provider overrides:
 | Request | Refresh interval | Evidence |
 | --- | --- | --- |
 | OpenAI API GPT-5.6+ | 28 minutes | OpenAI documents a 30-minute minimum. |
-| Codex OAuth and Copilot GPT-5.6+ | 28 minutes | Upstream behavior is assumed. |
+| Codex OAuth and Copilot GPT-5.6+ (including GPT-6.x) | 28 minutes | Upstream behavior is assumed. |
 | Copilot Sonnet/Opus 5+ | 4 minutes | Default or mixed cache markers. |
 | Copilot Sonnet/Opus 5+ with only `1h` markers | 58 minutes | Requested one-hour marker. |
 | Older supported Codex models | 4 minutes | Retention is unknown. |
@@ -126,8 +158,8 @@ not claim a cache hit or a cost saving after a request completes.
 
 1. An ordinary root-model request replaces the previous warming snapshot,
    including when the new request is unsupported.
-2. The plugin captures the outgoing request after OpenCode authentication and
-   routing finish.
+2. The plugin captures the outgoing HTTP request from OpenCode's `http.request`
+   hook, after authentication, routing, and body compression.
 3. It waits for the ordinary response body to finish or be cancelled before
    scheduling warming. Stopping the agent keeps warming the captured input
    until the original window expires; it does not restart the timer.
@@ -135,7 +167,7 @@ not claim a cache hit or a cost saving after a request completes.
    interval, until the fixed window expires.
 5. New ordinary activity, compaction, revert, deletion, non-cancellation errors,
    disposal, sleep/resume gaps, and incompatible responses stop the snapshot.
-   A resumed root-model request can establish a fresh window after expiry.
+   A retried root-model request can establish a fresh window after expiry.
 
 The plugin never sends catch-up bursts after sleep. Once a snapshot expires or is invalidated, a fresh ordinary request is required to capture a replayable input again.
 
@@ -149,13 +181,15 @@ With both plugins enabled, use these commands in a session:
 | `/warming start` | Start a fresh window using the latest valid snapshot, or wait for supported model activity. |
 | `/warming` | Open the warming action menu. |
 
+`/warming` is a V2 argument slash command. OpenCode clears the prompt before
+running it, so an invalid argument shows usage instead of staying editable.
 The command palette also has **Start warming** and **Stop warming** actions. In a child view, they control its root parent and label the feedback accordingly. Commands execute directly without creating an assistant turn or writing session history.
 
 Ordinary requests continue while warming is stopped and can supply a newer snapshot. The retained snapshot stays in RAM only until its existing expiry. Starting resets current-window statistics and progress, then schedules the first warm request one interval later. It waits for any ongoing ordinary response to finish. Starting an already enabled window does nothing.
 
 Start cannot recover an expired or invalidated snapshot, bypass configuration, or refresh credentials. When no valid snapshot remains, the indicator shows **Awaiting activity** until a supported ordinary request arrives. Stop lasts for the running server instance; restarting OpenCode clears it. Resetting window statistics does not delete journal history.
 
-Success feedback requires a server acknowledgement. If the result is not confirmed, check the indicator before retrying. Fully quit and restart OpenCode after updating the plugin to load the commands.
+Success feedback requires the server plugin's RPC response. If the result is not confirmed, check the indicator before retrying.
 
 ## Replay behavior and limits
 
@@ -189,8 +223,12 @@ Aborting locally does not guarantee immediate remote cancellation.
 
 ## TUI indicator
 
-When enabled, the indicator appears after LSP in the sidebar. If the sidebar is
-hidden, it moves to the prompt row. Child sessions show their root parent's status. Rendering only observes warming; the session commands explicitly control it.
+When enabled, the indicator appears in the sidebar. If the sidebar is hidden, it
+moves to the prompt footer, and in views without a prompt it appears above the
+composer. Child sessions show their root parent's status. Rendering only
+observes warming; the session commands explicitly control it. If OpenCode's
+native `warming` setting is configured, the indicator shows **Disabled** and the
+plugin suspends itself for that project.
 
 The bar shows elapsed time in the current warming window. Adjacent text shows
 state, next request, remaining time, completed requests, failures, and, after a
@@ -213,8 +251,9 @@ TUI options:
 | `showNextTimer` | `true` | Show the next-request countdown. |
 | `showRemainingTimer` | `true` | Show the window countdown. |
 
-The server and TUI plugins load separately. If the `Warming` section is missing,
-check both config files and restart OpenCode.
+The TUI reads status from the server plugin over plugin RPC, so it also works
+against a remote server that has the plugin configured. If the `Warming`
+section is missing, check both config files and restart OpenCode.
 
 ## Journal and privacy
 
@@ -234,6 +273,10 @@ at 4 MiB or UTC date boundaries, and retain 365 days by default. There is no
 default disk cap. `maxBytes` pauses new recording instead of deleting retained
 history. Keep exported data private because its IDs still identify local work.
 
+The V2 port keeps the V1 journal location and record format (schema 1), so
+existing history stays readable and is retained under the same policy. The V1
+`status/` directory is no longer used; status now travels over plugin RPC.
+
 Inspect the journal without modifying it:
 
 ```sh
@@ -246,10 +289,11 @@ warming. Restart OpenCode after changing the setting.
 
 ## Troubleshooting
 
-Search the OpenCode log for the plugin prefix:
+OpenCode V2 has no plugin logger, so the plugin writes its own private,
+size-bounded log (current file plus one rotated generation):
 
 ```sh
-rg '\[session-warming\]' ~/.local/share/opencode/log/opencode.log
+rg '\[session-warming\]' ~/.local/state/opencode/session-warming/plugin.log
 ```
 
 - `ready` means the server plugin initialized.
@@ -259,15 +303,15 @@ rg '\[session-warming\]' ~/.local/share/opencode/log/opencode.log
 - `warm-completed` means the response passed the protocol completion checks. It
   does not prove a cache refresh.
 - `warm-failed` includes a safe failure category and retry decision.
+- `skipped` with `websocket-transport` means OpenAI is still on WebSockets; set
+  the provider transport to `http`.
 
-If there is no `ready` event, check the configured server file URL and
-OpenCode's plugin-loader errors. If there is no `ui-ready` event, check the TUI
-file URL and the installed OpenCode version. Enable both plugin `debug` logging
-and OpenCode debug logging when investigating scheduling:
-
-```sh
-opencode --log-level DEBUG
-```
+If there is no `ready` event, check that the configured `package` is the
+checkout directory, then look for plugin-loader errors in
+`~/.local/share/opencode/log/opencode.log`. `opencode api get /api/plugin`
+lists active plugins. If there is no `ui-ready` event, check `cli.json` and the
+installed OpenCode version. Set the plugin's `debug` option to log scheduling
+details.
 
 ## Development
 
@@ -275,12 +319,15 @@ opencode --log-level DEBUG
 mise install
 npm ci
 npm run check
-npm run test:runtime
-npm run test:tui
+OPENCODE_BIN=/path/to/private/opencode-2.1.x npm run test:runtime
+OPENCODE_BIN=/path/to/private/opencode-2.1.x npm run test:tui
 ```
 
-The unit suite uses fake clocks and mock transports. Runtime and TUI tests use
-isolated HOME/XDG directories and local mock providers. No automated test calls
-a live model provider.
+The unit suite uses fake clocks and mock transports. Runtime and TUI tests need
+an explicitly supplied 2.1.x binary. They run a private `opencode serve` with
+isolated HOME, XDG, `OPENCODE_CONFIG_DIR`, and `OPENCODE_DB`, a fake isolated
+ChatGPT credential, and a local mock provider behind a fixture plugin and a dead
+proxy. No automated test calls a live model provider or touches the shared
+background service.
 
 The project is MIT licensed. See `LICENSE`.

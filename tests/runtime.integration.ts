@@ -1,243 +1,71 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { createServer } from "node:http"
-import type { ServerResponse } from "node:http"
-import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
-import { fileURLToPath, pathToFileURL } from "node:url"
-import { spawn, spawnSync } from "node:child_process"
+import { readFile, readdir } from "node:fs/promises"
+import { join } from "node:path"
 import { setTimeout as sleep } from "node:timers/promises"
-import { CAPTURE_HEADER, KEEPALIVE } from "../protocol.ts"
-import { readStatus } from "../status.ts"
-import { imageURL } from "./helpers.ts"
-import { isSupportedOpenCodeVersion } from "../compatibility.ts"
+import { KEEPALIVE } from "../protocol.ts"
+import { startServer } from "./v2-server.ts"
 
-const project = resolve(fileURLToPath(new URL("..", import.meta.url)))
-const encoder = (type: string, fields: Record<string, unknown>) => `event: ${type}\ndata: ${JSON.stringify({ type, ...fields })}\n\n`
-
-function sendResponse(res: ServerResponse, output: unknown[], id: string, call = false, contentType = "text/event-stream") {
-  const response = { id, object: "response", created_at: 1, status: "completed", model: "gpt-5.4", output,
-    usage: { input_tokens: 100, input_tokens_details: { cached_tokens: 90 }, output_tokens: 1 } }
-  res.writeHead(200, { "content-type": contentType })
-  res.write(encoder("response.created", { response: { ...response, status: "in_progress", output: [] } }))
-  const item = output[0] as Record<string, unknown>
-  res.write(encoder("response.output_item.added", { output_index: 0, item: { ...item, arguments: call ? "" : undefined, content: call ? undefined : [] } }))
-  if (call) {
-    res.write(encoder("response.function_call_arguments.delta", { item_id: item.id, output_index: 0, delta: item.arguments }))
-    res.write(encoder("response.function_call_arguments.done", { item_id: item.id, output_index: 0, arguments: item.arguments }))
-  } else {
-    const content = (item.content as Record<string, unknown>[])[0]
-    res.write(encoder("response.content_part.added", { item_id: item.id, output_index: 0, content_index: 0, part: { ...content, text: "" } }))
-    res.write(encoder("response.output_text.delta", { item_id: item.id, output_index: 0, content_index: 0, delta: content.text }))
-    res.write(encoder("response.output_text.done", { item_id: item.id, output_index: 0, content_index: 0, text: content.text }))
-  }
-  res.write(encoder("response.output_item.done", { output_index: 0, item }))
-  res.end(encoder("response.completed", { response }))
-}
-
-const message = (text: string, id: string) => [{ id, type: "message", role: "assistant", status: "completed",
-  content: [{ type: "output_text", text, annotations: [] }] }]
-
-test("installed v1 warms blocked parents, preserves OAuth, and stops on cancellation", { timeout: 120000 }, async (t) => {
-  const version = spawnSync("opencode", ["--version"], { encoding: "utf8" })
-  assert.equal(version.status, 0, "opencode must be available")
-  assert.equal(isSupportedOpenCodeVersion(version.stdout.trim()), true, "runtime integration requires OpenCode 1.18.x")
-  const home = await mkdtemp(join(tmpdir(), "opencode-warming-test-"))
-  const requests: { session: string; warm: boolean; marker: boolean; auth: boolean; at: number; input: unknown[] }[] = []
-  const notifications: string[] = []
-  const tools: string[] = []
-  const parents = new Set<string>()
-  const delegated = new Set<string>()
-  const childTimers = new Set<ReturnType<typeof setTimeout>>()
-  let processLogs = ""
-  const backend = createServer(async (req, res) => {
-    try {
-      let text = ""
-      for await (const chunk of req) text += chunk
-      if (req.url === "/idle") { notifications.push(JSON.parse(text).sessionID); res.end("ok"); return }
-      if (req.url === "/tool") { tools.push(JSON.parse(text).tool); res.end("ok"); return }
-      const body = JSON.parse(text)
-      const session = String(req.headers["session-id"] ?? req.headers["x-session-id"])
-      const warm = JSON.stringify(body.input.at(-1)).includes(KEEPALIVE)
-      requests.push({ session, warm, marker: CAPTURE_HEADER in req.headers, auth: req.headers.authorization === "Bearer integration-only", at: Date.now(), input: body.input })
-      const id = `resp_${requests.length}`
-      if (warm) { sendResponse(res, message("OK", `msg_${id}`), id, false, "application/json"); return }
-      const hasTask = body.tools?.some((tool: { name: string }) => tool.name === "task")
-      if (parents.has(session) && hasTask && !delegated.has(session)) {
-        delegated.add(session)
-        sendResponse(res, [{ id: `fc_${id}`, type: "function_call", name: "task", call_id: `call_${id}`,
-          arguments: JSON.stringify({ description: "slow child", prompt: "integration-child: return the result", subagent_type: "slow-child" }),
-          status: "completed" }], id, true)
-      } else if (!parents.has(session) && JSON.stringify(body.input).includes("integration-child")) {
-        // Keep child generation open while the parent is blocked on its foreground task.
-        const timer = setTimeout(() => { childTimers.delete(timer); if (!res.destroyed) sendResponse(res, message("child done", `msg_${id}`), id) }, 1800)
-        childTimers.add(timer)
-        res.on("close", () => { clearTimeout(timer); childTimers.delete(timer) })
-      } else sendResponse(res, message("parent done", `msg_${id}`), id)
-    } catch { res.writeHead(500); res.end("mock failure") }
-  })
-  await new Promise<void>((done) => backend.listen(0, "127.0.0.1", done))
-  const backendPort = (backend.address() as { port: number }).port
-  const temporary = createServer()
-  await new Promise<void>((done) => temporary.listen(0, "127.0.0.1", done))
-  const port = (temporary.address() as { port: number }).port
-  await new Promise<void>((done) => temporary.close(() => done()))
-  let child: ReturnType<typeof spawn> | undefined
+test("OpenCode V2 warms a blocked root over HTTP, keeps history clean, and honours RPC controls", { timeout: 180000 }, async (t) => {
+  const server = await startServer(t.signal)
+  const { api, rpc, requests, waitFor, warms } = server
   try {
-    const configHome = join(home, "config", "opencode")
-    const dataHome = join(home, "data", "opencode")
-    const worktree = join(home, "worktree")
-    await Promise.all([mkdir(configHome, { recursive: true }), mkdir(dataHome, { recursive: true }), mkdir(worktree)])
-    await writeFile(join(dataHome, "auth.json"), JSON.stringify({ openai: {
-      type: "oauth", access: "integration-only", refresh: "never-use-this", expires: Date.now() + 3600000, accountId: "integration",
-    } }))
-    const fixture = join(home, "fixture.ts")
-    // A test-only transport maps the genuine Codex URL to a local mock, before capture installs.
-    await writeFile(fixture, `export default async () => {
-      const original = globalThis.fetch;
-      globalThis.fetch = async (input, init) => {
-        const url = new URL(input instanceof Request ? input.url : String(input));
-        // The AI SDK reads embedded images through fetch; data URLs use no network.
-        if (url.protocol === "data:") return original(input, init);
-        if (url.href === "https://chatgpt.com/backend-api/codex/responses")
-          return original("http://127.0.0.1:${backendPort}/responses", init);
-        if (url.hostname === "127.0.0.1" || url.hostname === "localhost") return original(input, init);
-        throw new Error("External network disabled by integration fixture");
-      };
-      return {
-        event: async ({event}) => { if(event.type === "session.idle")
-          await fetch("http://127.0.0.1:${backendPort}/idle", {method:"POST", body:JSON.stringify(event.properties)}); },
-        "tool.execute.before": async ({tool}) => {
-          await fetch("http://127.0.0.1:${backendPort}/tool", {method:"POST", body:JSON.stringify({tool})}); }
-      };
-    };`)
-    const config = {
-      autoupdate: false, enabled_providers: ["openai"], model: "openai/gpt-5.4", small_model: "openai/gpt-5.4",
-      compaction: { auto: false, prune: false },
-      plugin: [pathToFileURL(fixture).href, [pathToFileURL(join(project, "plugin.ts")).href, { intervalMs: 200, durationMs: 6000 }]],
-      provider: { openai: { models: { "gpt-5.4": { name: "Mock Codex", limit: { context: 200000, output: 8192 } } } } },
-      agent: { "slow-child": { mode: "subagent", description: "Integration slow child", prompt: "Return the mock result without tools" } },
-    }
-    child = spawn("opencode", ["serve", "--hostname", "127.0.0.1", "--port", String(port), "--print-logs"], {
-      cwd: worktree,
-      env: { PATH: process.env.PATH, HOME: home, TMPDIR: home, XDG_CONFIG_HOME: join(home, "config"),
-        XDG_DATA_HOME: join(home, "data"), XDG_CACHE_HOME: join(home, "cache"), XDG_STATE_HOME: join(home, "state"),
-        OPENCODE_TEST_HOME: home, OPENCODE_CONFIG_CONTENT: JSON.stringify(config), OPENCODE_DISABLE_MODELS_FETCH: "1",
-        OPENCODE_EXPERIMENTAL_NATIVE_LLM: "false", OPENCODE_EXPERIMENTAL_WEBSOCKETS: "false" },
-      stdio: ["ignore", "pipe", "pipe"],
-    })
-    child.stdout!.on("data", (chunk) => { processLogs = (processLogs + chunk).slice(-16000) })
-    child.stderr!.on("data", (chunk) => { processLogs = (processLogs + chunk).slice(-16000) })
-    const base = `http://127.0.0.1:${port}`
-    async function api(path: string, body?: unknown, timeoutMs = 45000) {
-      const response = await fetch(base + path, { method: body === undefined ? "GET" : "POST",
-        headers: { "content-type": "application/json", "x-opencode-directory": worktree },
-        body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.any([AbortSignal.timeout(timeoutMs), t.signal]) })
-      assert.ok(response.ok, `${path}: HTTP ${response.status}: ${await (response.ok ? Promise.resolve("") : response.text())}`)
-      return response.json() as Promise<Record<string, unknown>>
-    }
-    async function waitFor(check: () => boolean | Promise<boolean>, description: string, timeout = 45000) {
-      const end = Date.now() + timeout
-      let lastError: unknown
-      while (Date.now() < end) {
-        if (child!.exitCode !== null) throw new Error(`OpenCode exited: ${processLogs}`)
-        try { if (await check()) return } catch (error) { lastError = error; if (child!.exitCode !== null) throw error }
-        await sleep(50)
-      }
-      throw new Error(`Timed out waiting for ${description}: ${String(lastError)}\n${processLogs}`, { cause: lastError })
-    }
-    await waitFor(async () => isSupportedOpenCodeVersion((await api("/global/health", undefined, 2000)).version), "server health")
-    const session = await api("/session", { title: "warming integration" })
-    const id = String(session.id)
-    parents.add(id)
-    const prompt = api(`/session/${id}/message`, { model: { providerID: "openai", modelID: "gpt-5.4" },
-      parts: [{ type: "text", text: "integration-parent: delegate to slow-child and wait" },
-        { type: "file", mime: "image/png", filename: "screenshot.png", url: imageURL }] })
-    await waitFor(() => requests.some((request) => request.session === id && request.warm), "parent warming during foreground task")
-    const ordinaryInput = requests.find((request) => request.session === id && !request.warm)!.input
-    assert.ok(ordinaryInput.some((item) => (item as { content?: { type: string; image_url?: string }[] }).content?.some(
-      (part) => part.type === "input_image" && part.image_url === imageURL)), "installed runtime must serialize the screenshot as embedded image input")
-    assert.deepEqual(requests.find((request) => request.session === id && request.warm)!.input.slice(0, -1), ordinaryInput)
-    const statusPath = join(home, "state", "opencode", "session-warming", "status")
-    await waitFor(async () => ((await readStatus(id, statusPath)).status?.attempted ?? 0) >= 1, "published warming progress")
-    assert.equal((await readFile(join(statusPath, `${id}.json`), "utf8")).includes("integration-only"), false)
-    assert.equal((await readFile(join(statusPath, `${id}.json`), "utf8")).includes(imageURL), false)
-    const status = await api("/session/status")
-    assert.equal((status[id] as { type: string }).type, "busy")
-    assert.equal(notifications.includes(id), false, "warming must not emit idle/task-completion events")
-    assert.equal(tools.filter((tool) => tool === "task").length, 1)
-    await prompt
-    const messages = await api(`/session/${id}/message`) as unknown as { info: { role: string }; parts: { type: string; text?: string }[] }[]
-    assert.equal(messages.filter((entry) => entry.info.role === "user").length, 1)
-    assert.equal(JSON.stringify(messages).includes(KEEPALIVE), false)
-    assert.equal(messages.some((entry) => entry.parts.some((part) => part.type === "text" && part.text === "OK")), false)
-    assert.ok(requests.every((request) => !request.marker && request.auth))
-    const childSessions = requests.filter((request) => request.session !== id)
-    assert.ok(childSessions.length > 0)
-    assert.ok(childSessions.every((request) => !request.warm))
+    const id = await server.rootSession("warming integration")
+    await api("POST", `/api/session/${id}/prompt`, { text: "integration-parent: delegate to the explore subagent and wait" })
+    await waitFor(() => warms(id).length > 0, "root warming during the foreground subagent")
+    const warm = warms(id)[0]
+    const ordinary = requests.filter((request) => request.session === id && !request.warm && request.at <= warm.at).at(-1)!
+    assert.deepEqual(warm.input.slice(0, -1), ordinary.input, "replay keeps the complete captured input as its prefix")
+    assert.equal(warm.encoding, "zstd", "ChatGPT replays keep the ordinary zstd body encoding")
+    assert.ok(requests.some((request) => request.session !== id && !request.warm), "child requests reached the mock")
+    assert.ok(requests.filter((request) => request.session !== id).every((request) => !request.warm), "children never warm")
+    assert.ok(requests.every((request) => request.auth), "every request used the isolated credential")
 
-    await waitFor(() => requests.some((request) => request.session === id && request.warm &&
-      request.input.some((item) => (item as { type?: string }).type === "function_call_output")), "warming after tool continuation with the screenshot still in history")
-    const continued = requests.filter((request) => request.session === id && !request.warm).at(-1)!
-    const continuedWarm = requests.find((request) => request.session === id && request.warm &&
-      request.input.some((item) => (item as { type?: string }).type === "function_call_output"))!
-    assert.deepEqual(continuedWarm.input.slice(0, -1), continued.input)
-    assert.equal(JSON.stringify(await api(`/session/${id}/message`)).includes(KEEPALIVE), false)
+    const status = await rpc("status", { sessionID: id }) as { status?: Record<string, unknown> }
+    assert.equal(status.status?.model, "gpt-6.1-sol")
+    assert.equal(status.status?.adapterID, "codex")
+    assert.equal(JSON.stringify(status).includes("integration-only"), false)
 
-    let controlSequence = 0
-    async function control(action: "start" | "stop", sessionID = id) {
-      const command = "session-warming.control.v1:" + JSON.stringify({ action, sessionID,
-        requestID: `runtime-control-${++controlSequence}`, deadlineAt: Date.now() + 5000 })
-      await api("/tui/publish", { type: "tui.command.execute", properties: { command } })
-    }
-    const historyBeforeStop = JSON.stringify(await api(`/session/${id}/message`))
-    await control("stop")
-    await waitFor(async () => (await readStatus(id, statusPath)).status?.manualStopped === true, "manual stop acknowledgement state")
-    const stoppedCount = requests.filter((request) => request.session === id && request.warm).length
-    await sleep(450)
-    assert.equal(requests.filter((request) => request.session === id && request.warm).length, stoppedCount)
-    assert.equal(JSON.stringify(await api(`/session/${id}/message`)), historyBeforeStop, "stop must not write conversation history")
-    await api(`/session/${id}/message`, { model: { providerID: "openai", modelID: "gpt-5.4" },
-      parts: [{ type: "text", text: "ordinary activity while warming remains manually stopped" }] })
-    await sleep(450)
-    assert.equal(requests.filter((request) => request.session === id && request.warm).length, stoppedCount)
-    assert.equal((await readStatus(id, statusPath)).status?.manualStopped, true)
-    const historyBeforeStart = JSON.stringify(await api(`/session/${id}/message`))
-    await control("start")
-    await waitFor(async () => (await readStatus(id, statusPath)).status?.manualStopped === false, "manual start fresh window")
-    const fresh = (await readStatus(id, statusPath)).status!
+    await api("POST", `/api/experimental/session/${id}/wait`, {}, 60000)
+    const history = JSON.stringify(await api("GET", `/api/session/${id}/message`))
+    assert.equal(history.includes(KEEPALIVE), false, "keepalive never enters session history")
+    assert.equal(/"text":"OK"/.test(history), false, "warm responses never enter session history")
+
+    const settled = warms(id).length
+    await waitFor(() => warms(id).length > settled, "warming after the final step")
+    assert.equal((await rpc("control", { requestID: "runtime-stop", sessionID: id, action: "stop" })).result, "stopped")
+    await sleep(100)
+    const afterStop = warms(id).length
+    await sleep(900)
+    assert.equal(warms(id).length, afterStop, "no warming while stopped")
+    assert.equal(JSON.stringify(await api("GET", `/api/session/${id}/message`)), history, "stop writes no history")
+    assert.equal((await rpc("control", { requestID: "runtime-start", sessionID: id, action: "start" })).result, "started")
+    const fresh = (await rpc("status", { sessionID: id })).status as { expiresAt: number; startedAt: number; manualStopped?: boolean }
     assert.equal(fresh.expiresAt - fresh.startedAt, 6000)
-    await waitFor(() => requests.filter((request) => request.session === id && request.warm).length > stoppedCount, "warming after manual start")
-    assert.equal(JSON.stringify(await api(`/session/${id}/message`)), historyBeforeStart, "start must not write conversation history")
+    assert.notEqual(fresh.manualStopped, true)
+    await waitFor(() => warms(id).length > afterStop, "warming after manual start")
+    assert.equal(JSON.stringify(await api("GET", `/api/session/${id}/message`)), history, "start writes no history")
 
-    const cancelled = await api("/session", { title: "cancellation integration" })
-    const cancelledID = String(cancelled.id)
-    parents.add(cancelledID)
-    const cancelledPrompt = api(`/session/${cancelledID}/message`, { model: { providerID: "openai", modelID: "gpt-5.4" },
-      parts: [{ type: "text", text: "integration-parent: delegate to slow-child and wait" }] }).catch(() => undefined)
-    await waitFor(() => requests.some((request) => request.session === cancelledID && request.warm), "second parent warming")
-    await api(`/session/${cancelledID}/abort`, {})
-    await cancelledPrompt
-    const before = requests.filter((request) => request.session === cancelledID && request.warm).length
-    await sleep(600)
-    assert.ok(requests.filter((request) => request.session === cancelledID && request.warm).length > before,
-      "ordinary cancellation should preserve the captured input for warming")
-  } catch (error) {
-    throw new Error(`Runtime integration failed: ${String(error)}\n${processLogs}`, { cause: error })
-  } finally {
-    if (child && child.exitCode === null && child.signalCode === null) {
-      child.kill("SIGTERM")
-      await Promise.race([new Promise<void>((done) => child!.once("exit", () => done())), sleep(3000)])
-      if (child.exitCode === null && child.signalCode === null) {
-        const exited = new Promise<void>((done) => child!.once("exit", () => done()))
-        child.kill("SIGKILL")
-        await exited
-      }
+    const cancelled = await server.rootSession("cancellation")
+    await api("POST", `/api/session/${cancelled}/prompt`, { text: "integration-parent: delegate to the explore subagent and wait" })
+    await waitFor(() => warms(cancelled).length > 0, "second root warming")
+    await api("POST", `/api/session/${cancelled}/interrupt`, {})
+    const before = warms(cancelled).length
+    await waitFor(() => warms(cancelled).length > before, "cancellation keeps the captured snapshot warm", 5000)
+
+    const state = join(server.home, "state", "opencode", "session-warming")
+    const log = await readFile(join(state, "plugin.log"), "utf8")
+    assert.match(log, /\[session-warming\] ready/)
+    assert.match(log, /\[session-warming\] warm-completed/)
+    const segments = await readdir(join(state, "events"))
+    assert.ok(segments.length > 0, "journal segments written")
+    const journal = (await Promise.all(segments.map((name) => readFile(join(state, "events", name), "utf8")))).join("")
+    for (const secret of ["integration-only", "never-use-this", "integration-parent", KEEPALIVE]) {
+      assert.equal(log.includes(secret), false, `plugin log leaks ${secret}`)
+      assert.equal(journal.includes(secret), false, `journal leaks ${secret}`)
     }
-    for (const timer of childTimers) clearTimeout(timer)
-    backend.closeAllConnections()
-    await new Promise<void>((done) => backend.close(() => done()))
-    await rm(home, { recursive: true, force: true })
-  }
+    assert.match(journal, /"event":"ordinary.step-usage"/)
+  } catch (error) {
+    throw new Error(`Runtime integration failed: ${String(error)}\n${server.logs.text}`, { cause: error })
+  } finally { await server.stop() }
 })

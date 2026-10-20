@@ -120,7 +120,7 @@ test("stops freeze elapsed fill even after deadline, expiry is dimmed, and unava
   assert.equal(expired.progress, 1)
   assert.equal(expired.dimmed, true)
   assert.equal(expired.left, undefined)
-  for (const read of [{}, { unavailable: "stale" as const }, { unavailable: "invalid" as const }]) {
+  for (const read of [{}, { unavailable: "not-loaded" as const }, { unavailable: "invalid" as const }]) {
     const model = indicator(read, 0)
     assert.equal(model.hasWindow, false)
     assert.equal(model.completed, undefined)

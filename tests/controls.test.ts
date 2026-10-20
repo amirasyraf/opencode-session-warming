@@ -1,168 +1,83 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { setImmediate, setTimeout as sleep } from "node:timers/promises"
-import { ControlClient, ControlServer, CONTROL_TIMEOUT_MS, parseWarmingCommand } from "../controls.ts"
-import type { ControlRequest } from "../controls.ts"
+import { setTimeout as sleep } from "node:timers/promises"
+import { ControlServer, controlRequest, parseWarmingArguments } from "../controls.ts"
+import type { ControlRequest, ControlResult } from "../controls.ts"
 
-const prefix = "session-warming.control.v1:"
-const ack = "session-warming.ack.v1:"
-const request = (requestID = "request", action: "start" | "stop" = "start"): ControlRequest =>
-  ({ requestID, action, sessionID: "root", deadlineAt: Date.now() + CONTROL_TIMEOUT_MS })
+const request = (sessionID = "root", action: "start" | "stop" = "stop", requestID = `req-${Math.random().toString(36).slice(2)}`) =>
+  controlRequest({ requestID, sessionID, action })!
 
-test("warming parser reserves one exact command and consumes invalid arguments locally", () => {
-  assert.equal(parseWarmingCommand(" /warming stop "), "stop")
-  assert.equal(parseWarmingCommand("/warming\tstart"), "start")
-  assert.equal(parseWarmingCommand("/warming"), "menu")
-  for (const input of ["/warming restart", "/warming start extra", "/warming\nstop", "/warming stop\nsecret"])
-    assert.equal(parseWarmingCommand(input), "invalid", input)
-  for (const input of ["/warming-other stop", "Explain /warming start", "ordinary prompt", "!/warming stop"])
-    assert.equal(parseWarmingCommand(input), undefined, input)
+test("slash arguments map to the menu or one exact action; anything else is usage", () => {
+  assert.equal(parseWarmingArguments(undefined), "menu")
+  assert.equal(parseWarmingArguments("  "), "menu")
+  assert.equal(parseWarmingArguments("start"), "start")
+  assert.equal(parseWarmingArguments(" stop "), "stop")
+  for (const value of ["restart", "start now", "stop!", "START"]) assert.equal(parseWarmingArguments(value), "invalid")
 })
 
-test("client requires a matching acknowledgement and never sends editor contents", async () => {
-  let sent = ""
-  const client = new ControlClient(async (command) => { sent = command })
-  const result = client.request("stop", "root")
-  await setImmediate()
-  const body = JSON.parse(sent.slice(prefix.length))
-  assert.deepEqual(Object.keys(body).sort(), ["action", "deadlineAt", "requestID", "sessionID"])
-  let settled = false
-  void result.then(() => { settled = true })
-  client.receive(ack + JSON.stringify({ ...body, sessionID: "other", result: "stopped" }))
-  client.receive(ack + JSON.stringify({ ...body, action: "start", result: "stopped" }))
-  client.receive(ack + JSON.stringify({ ...body, result: "stopped", prompt: "secret" }))
-  await setImmediate()
-  assert.equal(settled, false)
-  client.receive(ack + JSON.stringify({ ...body, result: "stopped" }))
-  assert.equal(await result, "stopped")
-  client.dispose()
+test("RPC control inputs accept only allowlisted metadata and receive a local deadline", () => {
+  const now = 1_000
+  assert.deepEqual(controlRequest({ requestID: "r1", sessionID: "ses_1", action: "start" }, now),
+    { requestID: "r1", sessionID: "ses_1", action: "start", deadlineAt: now + 5000 })
+  for (const value of [undefined, null, [], { requestID: "r1", sessionID: "ses_1", action: "pause" },
+    { requestID: "r1", sessionID: "../x", action: "stop" }, { requestID: "r1", sessionID: "ses_1", action: "stop", prompt: "secret" },
+    { requestID: "r".repeat(129), sessionID: "ses_1", action: "stop" }]) assert.equal(controlRequest(value, now), undefined)
 })
 
-test("control round trip deduplicates both concurrent and completed requests", async () => {
-  let calls = 0
-  let release!: () => void
-  const replies: string[] = []
-  const server = new ControlServer(async () => {
-    calls++
-    await new Promise<void>((resolve) => { release = resolve })
-    return "started"
-  }, async (command) => { replies.push(command) })
-  const body = request()
-  const command = prefix + JSON.stringify(body)
-  const first = server.receive(command)
-  const duplicate = server.receive(command)
-  await setImmediate()
-  assert.equal(calls, 1)
-  release()
-  await Promise.all([first, duplicate])
-  await server.receive(command)
-  await server.receive(prefix + JSON.stringify({ ...body, action: "stop" }))
-  assert.equal(calls, 1)
-  assert.equal(replies.length, 2)
-  assert.ok(replies.every((reply) => JSON.parse(reply.slice(ack.length)).result === "started"))
-  server.dispose()
-})
-
-test("server validates envelopes and rejects expired, oversized and future requests", async () => {
-  let calls = 0
-  const server = new ControlServer(async () => { calls++; return "started" }, async () => {})
-  const body = request()
-  for (const value of [{ ...body, action: "reset" }, { ...body, sessionID: "../secret" }, { ...body, headers: "secret" },
-    { ...body, deadlineAt: Date.now() - 1 }, { ...body, deadlineAt: Date.now() + CONTROL_TIMEOUT_MS + 10000 }])
-    await server.receive(prefix + JSON.stringify(value))
-  await server.receive(prefix + "null")
-  await server.receive(prefix + "{" + " ".repeat(1024))
-  await server.receive("other-plugin:" + JSON.stringify(body))
-  assert.equal(calls, 0)
-  server.dispose()
+test("duplicate request IDs apply once, and mismatched duplicates are rejected", async () => {
+  let applied = 0
+  const server = new ControlServer(async () => { applied++; await sleep(5); return "stopped" })
+  const first = request("root", "stop", "same")
+  const results = await Promise.all([server.receive(first), server.receive(first)])
+  assert.deepEqual(results, ["stopped", "stopped"])
+  assert.equal(await server.receive(first), "stopped")
+  assert.equal(await server.receive({ ...first, action: "start" }), "busy")
+  assert.equal(applied, 1)
 })
 
 test("actions are ordered per session while independent roots proceed", async () => {
-  const applied: string[] = []
+  const order: string[] = []
   let release!: () => void
-  const server = new ControlServer(async (body) => {
-    applied.push(body.requestID)
-    if (body.requestID === "first") await new Promise<void>((done) => { release = done })
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const server = new ControlServer(async (value: ControlRequest) => {
+    order.push(`${value.sessionID}:${value.action}:start`)
+    if (value.sessionID === "a" && value.action === "stop") await gate
+    order.push(`${value.sessionID}:${value.action}:end`)
+    return value.action === "stop" ? "stopped" : "started"
+  })
+  const a1 = server.receive(request("a", "stop"))
+  const a2 = server.receive(request("a", "start"))
+  assert.equal(await server.receive(request("b", "start")), "started")
+  release()
+  assert.deepEqual(await Promise.all([a1, a2]), ["stopped", "started"])
+  assert.deepEqual(order, ["a:stop:start", "b:start:start", "b:start:end", "a:stop:end", "a:start:start", "a:start:end"])
+})
+
+test("deletion and disposal fence continuations; expired deadlines never mutate", async () => {
+  let mutated = 0
+  const server = new ControlServer(async (_value, current) => {
+    await sleep(10)
+    if (!current()) return "expired"
+    mutated++
     return "stopped"
-  }, async () => {})
-  const first = server.receive(prefix + JSON.stringify(request("first", "stop")))
-  const second = server.receive(prefix + JSON.stringify(request("second")))
-  await server.receive(prefix + JSON.stringify({ ...request("independent"), sessionID: "other" }))
-  assert.deepEqual(applied, ["first", "independent"])
-  release()
-  await Promise.all([first, second])
-  assert.deepEqual(applied, ["first", "independent", "second"])
+  })
+  const pending = server.receive(request("gone"))
+  server.cancel("gone")
+  assert.equal(await pending, "expired")
+  const late = { ...request("late"), deadlineAt: Date.now() - 1 }
+  assert.equal(await server.receive(late), "expired")
   server.dispose()
+  assert.equal(await server.receive(request("after")), "unavailable")
+  assert.equal(mutated, 0)
 })
 
-test("deletion and disposal fence metadata continuations, and delivery failures are contained", async () => {
-  for (const operation of ["cancel", "dispose"] as const) {
-    let release!: () => void
-    let applied = false
-    const server = new ControlServer(async (_body, current) => {
-      await new Promise<void>((done) => { release = done })
-      if (current()) applied = true
-      return "started"
-    }, async () => { throw new Error("fixture transport failure") })
-    const work = server.receive(prefix + JSON.stringify(request()))
-    await setImmediate()
-    if (operation === "cancel") server.cancel("root")
-    else server.dispose()
-    release()
-    await work
-    assert.equal(applied, false, operation)
-    server.dispose()
-  }
-  const client = new ControlClient(async () => { throw new Error("fixture transport failure") })
-  assert.equal(await client.request("stop", "root"), "unconfirmed")
-  const pending = new ControlClient(async () => {})
-  const work = pending.request("stop", "root")
-  pending.dispose()
-  assert.equal(await work, "unconfirmed")
-  assert.equal(await pending.request("start", "root"), "unavailable")
-})
-
-test("expired metadata lookups cannot apply controls after local deadlines", async () => {
-  let release!: () => void
-  let applied = false
-  const server = new ControlServer(async (_body, current) => {
-    await new Promise<void>((done) => { release = done })
-    if (current()) applied = true
-    return "started"
-  }, async () => {})
-  const work = server.receive(prefix + JSON.stringify({ ...request(), deadlineAt: Date.now() + 25 }))
-  await sleep(50)
-  await work
-  release()
-  await setImmediate()
-  assert.equal(applied, false)
-  server.dispose()
-})
-
-test("client reports an unconfirmed result when the server does not acknowledge", { timeout: 7000 }, async () => {
-  const client = new ControlClient(async () => {})
-  const [result] = await Promise.all([client.request("stop", "root"), sleep(CONTROL_TIMEOUT_MS + 50)])
-  assert.equal(result, "unconfirmed")
-  client.dispose()
-})
-
-test("client and server pressure limits reject excess work without evicting active controls", async () => {
-  const client = new ControlClient(async () => {})
-  const pending = Array.from({ length: 8 }, () => client.request("stop", "root"))
-  assert.equal(await client.request("stop", "root"), "busy")
-  client.dispose()
-  assert.ok((await Promise.all(pending)).every((result) => result === "unconfirmed"))
-  const releases: (() => void)[] = []
-  const replies: string[] = []
-  const server = new ControlServer(async () => {
-    await new Promise<void>((done) => { releases.push(done) })
-    return "started"
-  }, async (command) => { replies.push(command) })
-  const work = Array.from({ length: 32 }, (_, index) => server.receive(prefix + JSON.stringify({ ...request(`request-${index}`), sessionID: `root-${index}` })))
-  await setImmediate()
-  await server.receive(prefix + JSON.stringify(request("excess")))
-  assert.equal(JSON.parse(replies[0].slice(ack.length)).result, "busy")
-  for (const release of releases) release()
-  await Promise.all(work)
-  server.dispose()
+test("metadata failures report unavailable and pressure limits reject excess work", async () => {
+  const failing = new ControlServer(async () => { throw new Error("lookup failed") })
+  assert.equal(await failing.receive(request()), "unavailable")
+  const results: Promise<ControlResult>[] = []
+  const slow = new ControlServer(async () => { await sleep(20); return "stopped" })
+  for (let index = 0; index < 40; index++) results.push(slow.receive(request(`s${index}`)))
+  const settled = await Promise.all(results)
+  assert.ok(settled.includes("busy"))
+  assert.ok(settled.filter((value) => value === "stopped").length >= 32)
 })

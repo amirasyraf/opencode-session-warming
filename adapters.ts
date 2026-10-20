@@ -1,4 +1,4 @@
-import { CODEX_ENDPOINT, classifyRequest, discardWarmResponse, object, warmRequest } from "./protocol.ts"
+import { CODEX_ENDPOINT, classifyRequest, discardWarmResponse, encodedRequest, object, warmRequest } from "./protocol.ts"
 import type { Snapshot, Usage, ResponseContract } from "./protocol.ts"
 import { GPT_INTERVAL_MS, GPT_TTL_MS, LEGACY_INTERVAL_MS, modernClaude, modernGPT } from "./cache-policy.ts"
 import type { CacheProfile } from "./cache-policy.ts"
@@ -20,8 +20,11 @@ export type WarmingAdapter = {
   capture(context: ModelContext, url: string, init: RequestInit): CaptureResult
 }
 const OPENAI_ENDPOINT = "https://api.openai.com/v1/responses"
-const COPILOT_RESPONSES = "https://api.githubcopilot.com/responses"
-const COPILOT_MESSAGES = "https://api.githubcopilot.com/v1/messages"
+// OpenCode V2 uses the API host advertised by the Copilot token (individual/business plans) or the default host.
+// Enterprise and custom endpoints stay unsupported.
+const COPILOT_HOSTS = ["https://api.githubcopilot.com", "https://api.individual.githubcopilot.com", "https://api.business.githubcopilot.com"]
+const COPILOT_RESPONSES = COPILOT_HOSTS.map((host) => `${host}/responses`)
+const COPILOT_MESSAGES = COPILOT_HOSTS.map((host) => `${host}/v1/messages`)
 const gptProfile = (documented = false): Automatic => ({ intervalMs: GPT_INTERVAL_MS, ttlMs: GPT_TTL_MS,
   ttlEvidence: documented ? "documented" : "upstream-assumed" })
 
@@ -42,7 +45,7 @@ const codex: WarmingAdapter = {
 function replay(adapterID: string, snapshot: Snapshot, strategy: Replay["strategy"], automatic: Automatic,
   body: Record<string, unknown>, contract: ResponseContract): Replay {
   return { adapterID, snapshot, strategy, automatic,
-    request: (signal) => ({ method: "POST", headers: new Headers(snapshot.headers), body: JSON.stringify(body), signal, redirect: "error" }),
+    request: (signal) => encodedRequest(snapshot, body, signal),
     drain: (response, signal) => discardWarmResponse(response, signal, contract) }
 }
 
@@ -78,7 +81,7 @@ function claudeProfile(body: Record<string, unknown>): Automatic {
 }
 
 const copilot: WarmingAdapter = {
-  id: "github-copilot", providerID: "github-copilot", endpoints: [COPILOT_RESPONSES, COPILOT_MESSAGES], supports: (context) => context.providerID === "github-copilot" &&
+  id: "github-copilot", providerID: "github-copilot", endpoints: [...COPILOT_RESPONSES, ...COPILOT_MESSAGES], supports: (context) => context.providerID === "github-copilot" &&
     (modernGPT(context.modelID) || modernClaude(context.modelID)),
   capture(context, url, init) {
     const messages = modernClaude(context.modelID)

@@ -151,3 +151,19 @@ test("policy overrides are exact, independently inherited, validated and copied"
     { providers: { "github-copilot": { models: { "gpt-6": { intervalMs: Infinity } } } } },
     { providers: { openai: { enabled: "yes" } } }]) assert.equal(settings(invalid), undefined)
 })
+
+test("V2 Copilot plan hosts are accepted; enterprise and custom hosts stay unsupported; GPT-6.x stays eligible", () => {
+  const body = { ...requestBody, model: "gpt-5.6-sol" }
+  for (const host of ["https://api.individual.githubcopilot.com", "https://api.business.githubcopilot.com"]) {
+    assert.ok(capture(context(), `${host}/responses`, init(body)).replay, host)
+  }
+  for (const host of ["https://api.enterprise.githubcopilot.com", "https://copilot-api.example.com"]) {
+    assert.equal(capture(context(), `${host}/responses`, init(body)).reason, "unsupported-endpoint", host)
+  }
+  for (const id of ["gpt-6.1-sol", "gpt-6-luna", "gpt-6-astra"]) {
+    assert.ok(supportsModel(context("openai", id)), id)
+    const replay = capture(context("openai", id), CODEX_ENDPOINT, init({ ...requestBody, model: id })).replay!
+    assert.equal(replay.adapterID, "codex")
+    assert.equal(replay.automatic.intervalMs, GPT_INTERVAL_MS)
+  }
+})

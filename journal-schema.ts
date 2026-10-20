@@ -1,5 +1,5 @@
 /** The journal stores metadata only. Reconstruct values; never serialize SDK/request objects. */
-export const PLUGIN_VERSION = "0.1.0"
+export const PLUGIN_VERSION = "0.2.0"
 export const MAX_RECORD_BYTES = 8 * 1024
 export const MAX_SEGMENT_BYTES = 4 * 1024 * 1024
 export const DAY_MS = 86_400_000
@@ -57,7 +57,8 @@ const reasons = ["unclassified", "configured-off", "unsupported-transport", "ord
   "unsupported-tools", "cache-disabled", "unsupported-request-field", "invalid-json-or-headers", "storage-error", "io-timeout",
   "pressure", "policy-unavailable", "unknown-option", "invalid-enabled", "invalid-debug", "invalid-duration", "invalid-interval",
   "interval-not-less-than-duration", "invalid-overrides", "invalid-journal", "invalid-journal-enabled", "invalid-journal-retention",
-  "invalid-journal-max-bytes"]
+  "invalid-journal-max-bytes", "unsupported-content-encoding", "unsupported-input-compaction", "websocket-transport",
+  "native-warming", "publish-failed", "unsupported-opencode-version"]
 const enums: Record<string, readonly string[]> = {
   reason: reasons,
   adapterID: ["codex", "openai-api", "github-copilot"], strategy: ["keepalive", "native-prewarm", "bounded-replay"],
@@ -66,7 +67,7 @@ const enums: Record<string, readonly string[]> = {
   errorCode: ["ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "EPIPE", "ENETUNREACH", "EHOSTUNREACH",
     "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_SOCKET", "UND_ERR_HEADERS_TIMEOUT", "metadata-timeout", "logger-timeout", "log-rejected",
     "unsupported-warm-response", "invalid-sse-json", "invalid-warm-json", "warm-response-too-large", "warm-frame-too-large",
-    "stream-truncated", "stream-failed", "stream-incomplete"],
+    "stream-truncated", "stream-failed", "stream-incomplete", "unsupported-content-encoding"],
   usageSource: ["opencode-normalized", "provider-response"], upstreamUsageAvailability: ["unknown"],
   costSource: ["opencode-step"], costUnit: ["unspecified"], finish: ["stop", "tool-calls", "length", "content-filter", "error", "other"],
 }

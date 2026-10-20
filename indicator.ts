@@ -35,6 +35,8 @@ function stoppedReason(status: WarmStatus): string {
   if (status.reason === "ordinary-activity") return "New model activity"
   if (status.reason === "clock-gap") return "Resumed late"
   if (status.reason === "user-stop") return "By user"
+  if (status.reason === "websocket-transport") return "WebSocket transport (set provider transport to http)"
+  if (status.reason === "native-warming") return "OpenCode native warming is configured"
   return (status.reason ?? "inactive").replaceAll("-", " ")
 }
 
@@ -42,6 +44,7 @@ function stoppedReason(status: WarmStatus): string {
 export function indicator(read: StatusRead, now: number,
   timers: { showNextTimer?: boolean; showRemainingTimer?: boolean } = {}): Indicator {
   const empty = { progress: 0, hasWindow: false, dimmed: true, timerWidth: 5, durationMs: 0, intervalMs: 0 }
+  if (read.native) return { ...empty, state: "Disabled", detail: "OpenCode native warming is configured; remove `warming`" }
   if (!read.status) return { ...empty, state: read.unavailable ? "Unavailable" : "Inactive",
     detail: read.unavailable ? `Status ${read.unavailable.replaceAll("-", " ")}` : "Awaiting model activity" }
   const status = read.status

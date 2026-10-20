@@ -1,12 +1,11 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { CAPTURE_HEADER, KEEPALIVE, captureRequest, classifyRequest, discardWarmResponse, retryAfterMs, warmRequest } from "../protocol.ts"
+import { KEEPALIVE, captureRequest, classifyRequest, discardWarmResponse, retryAfterMs, warmRequest } from "../protocol.ts"
 import { completedResponse, imageURL, ordinary, requestBody } from "./helpers.ts"
 
 test("replay preserves cache prefix, reasoning and tool definitions without request mutation", () => {
   const [url, init] = ordinary()
   const headers = new Headers(init.headers)
-  headers.set(CAPTURE_HEADER, "opaque")
   headers.set("content-length", "999")
   headers.set("idempotency-key", "ordinary-only")
   init.headers = headers
@@ -23,10 +22,8 @@ test("replay preserves cache prefix, reasoning and tool definitions without requ
   assert.equal(body.store, false)
   assert.equal(body.stream, true)
   assert.equal(warm.signal, controller.signal)
-  assert.equal(new Headers(warm.headers).get(CAPTURE_HEADER), null)
   assert.equal(new Headers(warm.headers).get("content-length"), null)
   assert.equal(new Headers(warm.headers).get("idempotency-key"), null)
-  assert.equal(headers.get(CAPTURE_HEADER), "opaque")
   assert.deepEqual(JSON.parse(init.body as string), requestBody)
 })
 
@@ -222,4 +219,45 @@ test("unsupported capture shapes report specific reasons without their content",
   assert.equal(classifyRequest(url, { ...init, body: JSON.stringify({ ...requestBody, tools: [{ type: "web_search" }] }) }).reason, "unsupported-tools")
   assert.equal(classifyRequest(url, { ...init, body: JSON.stringify({ ...requestBody, conversation: "secret-conversation" }) }).reason, "stateful-request")
   assert.equal(classifyRequest(url, { ...init, body: "secret-invalid-json" }).reason, "invalid-json-or-headers")
+})
+
+test("V2 Responses shapes: opaque compaction items, namespaces and namespaced calls are preserved", () => {
+  const [url, init] = ordinary({ ...requestBody,
+    input: [{ type: "compaction", id: null, encrypted_content: "opaque-summary" }, ...requestBody.input,
+      { type: "function_call", call_id: "c1", name: "search", namespace: "docs", arguments: "{}" },
+      { type: "function_call_output", call_id: "c1", output: "done" }],
+    tools: [...requestBody.tools, { type: "namespace", name: "docs", description: "Docs", tools: [
+      { type: "function", name: "search", description: "Search", parameters: { type: "object" } }] }] })
+  const snapshot = captureRequest(url, init)!
+  assert.ok(snapshot)
+  const body = JSON.parse(warmRequest(snapshot, new AbortController().signal).body as string)
+  assert.deepEqual(body.input[0], { type: "compaction", id: null, encrypted_content: "opaque-summary" })
+  assert.equal(body.tools.at(-1).type, "namespace")
+  for (const change of [
+    { input: [{ type: "compaction", encrypted_content: 1 }] },
+    { input: [{ type: "compaction", encrypted_content: "x", extra: true }] },
+    { tools: [{ type: "namespace", name: "n", tools: [{ type: "web_search" }] }] },
+    { tools: [{ type: "namespace", name: "n", tools: [{ type: "namespace", name: "inner", tools: [] }] }] },
+  ]) assert.equal(captureRequest(url, { ...init, body: JSON.stringify({ ...requestBody, ...change }) }), undefined, JSON.stringify(change))
+})
+
+test("encoded ordinary bodies replay with the same content encoding; unknown encodings are skipped", async () => {
+  const { zstdDecompressSync, gunzipSync } = await import("node:zlib")
+  for (const encoding of ["zstd", "gzip"] as const) {
+    const [url, init] = ordinary()
+    const headers = new Headers(init.headers)
+    headers.set("content-encoding", encoding)
+    const snapshot = classifyRequest(url, { ...init, headers }).snapshot!
+    assert.equal(snapshot.encoding, encoding)
+    assert.equal(snapshot.headers.get("content-encoding"), null)
+    const warm = warmRequest(snapshot, new AbortController().signal)
+    assert.equal(new Headers(warm.headers).get("content-encoding"), encoding)
+    const bytes = warm.body as Uint8Array
+    const text = (encoding === "zstd" ? zstdDecompressSync(bytes) : gunzipSync(bytes)).toString("utf8")
+    assert.deepEqual(JSON.parse(text).input.slice(0, -1), requestBody.input)
+  }
+  const [url, init] = ordinary()
+  const headers = new Headers(init.headers)
+  headers.set("content-encoding", "br")
+  assert.equal(classifyRequest(url, { ...init, headers }).reason, "unsupported-content-encoding")
 })

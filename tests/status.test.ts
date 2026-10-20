@@ -1,79 +1,52 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
-import { readStatus, StatusPublisher } from "../status.ts"
+import { setTimeout as sleep } from "node:timers/promises"
+import { StatusRegistry, safeStatus, wireStatus } from "../status.ts"
 import type { WarmStatus } from "../status.ts"
+import type { Diagnostic } from "../diagnostics.ts"
 
-function state(sessionID = "root"): WarmStatus {
-  const now = Date.now()
-  return { sessionID, phase: "waiting", startedAt: now, expiresAt: now + 60000, intervalMs: 4000,
-    durationMs: 60000, nextAttemptAt: now + 4000, attempted: 0, completed: 0, failed: 0, marks: [] }
-}
+const status = (sessionID = "ses_1", extra: Record<string, unknown> = {}): WarmStatus => ({
+  sessionID, phase: "waiting", startedAt: 1, expiresAt: 10_000, intervalMs: 100, durationMs: 9_999,
+  attempted: 1, completed: 1, failed: 0, marks: [{ at: 2, result: "completed" }], providerID: "openai", model: "gpt-6.1-sol",
+  ...extra,
+} as WarmStatus)
 
-test("metadata IPC is session-isolated, atomic, and never serializes extra request data", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "warming-status-"))
-  const writer = new StatusPublisher(() => {}, dir)
-  try {
-    writer.publish({ ...state("a"), providerID: "github-copilot", model: "gpt-5.6-sol", ttlMs: 1800000,
-      ttlEvidence: "upstream-assumed", intervalSource: "model", strategy: "bounded-replay", adapterID: "github-copilot",
-      usage: { inputTokens: 12000, cachedTokens: 9000, cacheWriteTokens: 1000, cacheWrite5mTokens: 500, cacheWrite1hTokens: 500 },
-      body: "secret prompt", headers: "Bearer secret" } as WarmStatus)
-    writer.publish({ ...state("b"), attempted: 3, phase: "stopped", manualStopped: true, reason: "user-stop", stoppedAt: Date.now() })
-    await writer.flush()
-    assert.equal((await readStatus("a", dir)).status?.attempted, 0)
-    assert.equal((await readStatus("a", dir)).status?.ttlEvidence, "upstream-assumed")
-    assert.equal((await readStatus("a", dir)).status?.model, "gpt-5.6-sol")
-    assert.deepEqual((await readStatus("a", dir)).status?.usage,
-      { inputTokens: 12000, cachedTokens: 9000, cacheWriteTokens: 1000, cacheWrite5mTokens: 500, cacheWrite1hTokens: 500 })
-    assert.equal((await readStatus("b", dir)).status?.attempted, 3)
-    assert.equal((await readStatus("b", dir)).status?.manualStopped, true)
-    writer.publish({ ...state("idle"), phase: "idle", expiresAt: 0, manualStopped: false, reason: "awaiting-activity" })
-    await writer.flush()
-    assert.equal((await readStatus("idle", dir)).status?.phase, "idle")
-    const raw = await readFile(join(dir, "a.json"), "utf8")
-    assert.equal(raw.includes("secret"), false)
-    writer.publish({ ...state("a"), attempted: 1 })
-    writer.publish({ ...state("a"), attempted: 2 })
-    await writer.flush()
-    assert.equal((await readStatus("a", dir)).status?.attempted, 2)
-    assert.equal((await readStatus("../outside", dir)).unavailable, "invalid")
-    assert.deepEqual(await readStatus("missing", dir), {})
-  } finally { await writer.dispose(); await rm(dir, { recursive: true, force: true }) }
+test("status IPC reconstructs allowlisted metadata only", () => {
+  const unsafe = { ...status(), headers: { authorization: "Bearer secret" }, snapshot: { input: "prompt" },
+    reason: "Bearer secret value", model: "../../etc", usage: { inputTokens: 3, prompt: "x" } } as unknown as WarmStatus
+  const safe = safeStatus(unsafe)!
+  const text = JSON.stringify(wireStatus(safe))
+  for (const leak of ["secret", "prompt", "etc", "headers", "snapshot"]) assert.equal(text.includes(leak), false, leak)
+  assert.deepEqual(safe.usage, { inputTokens: 3 })
+  for (const invalid of [{ ...status(), sessionID: "../x" }, { ...status(), phase: "bogus" }, { ...status(), marks: [{ at: -1, result: "completed" }] }]) {
+    assert.equal(safeStatus(invalid), undefined)
+  }
 })
 
-test("reader rejects stale, oversized and invalid records; disposed owners leave no active status", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "warming-status-"))
-  const writer = new StatusPublisher(() => {}, dir)
-  try {
-    writer.publish(state())
-    await writer.flush()
-    assert.equal((await readStatus("root", dir, Date.now() + 16000)).unavailable, "stale")
-    await writeFile(join(dir, "invalid.json"), "invalid JSON")
-    assert.equal((await readStatus("invalid", dir)).unavailable, "invalid")
-    await writeFile(join(dir, "huge.json"), "x".repeat(65537))
-    assert.equal((await readStatus("huge", dir)).unavailable, "invalid")
-    await writer.dispose()
-    assert.deepEqual(await readStatus("root", dir), {})
-    writer.publish(state())
-    await writer.flush()
-    assert.deepEqual(await readStatus("root", dir), {})
-  } finally { await writer.dispose(); await rm(dir, { recursive: true, force: true }) }
+test("publication is coalesced, bounded, and emits the latest sanitized state per session", async () => {
+  const emitted: WarmStatus[] = []
+  const registry = new StatusRegistry(() => {}, async (value) => { emitted.push(value) })
+  registry.publish(status("ses_1", { completed: 1 }))
+  registry.publish(status("ses_1", { completed: 2 }))
+  registry.publish(status("ses_2"))
+  assert.equal(registry.get("ses_1")?.completed, 2)
+  await sleep(300)
+  assert.deepEqual(emitted.map((value) => [value.sessionID, value.completed]), [["ses_1", 2], ["ses_2", 1]])
+  for (let index = 0; index < 70; index++) registry.publish(status(`ses_x${index}`))
+  assert.equal(registry.get("ses_1"), undefined, "oldest sessions are evicted past the bound")
+  registry.forget("ses_x69")
+  assert.equal(registry.get("ses_x69"), undefined)
+  registry.dispose()
+  registry.publish(status("ses_after"))
+  assert.equal(registry.get("ses_after"), undefined)
 })
 
-test("optional UI publication failures are reported without throwing into the engine", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "warming-status-"))
-  const bad = join(dir, "not-a-directory")
-  await writeFile(bad, "fixture")
-  const logs: string[] = []
-  const writer = new StatusPublisher((entry) => logs.push(entry.event), bad)
-  try {
-    writer.publish(state())
-    await writer.flush()
-    assert.deepEqual(logs, ["ui-status-failed"])
-    writer.publish(state())
-    await writer.flush()
-    assert.equal(logs.length, 1)
-  } finally { await writer.dispose(); await rm(dir, { recursive: true, force: true }) }
+test("emit failures are reported once and never thrown into the engine", async () => {
+  const logs: Diagnostic[] = []
+  const registry = new StatusRegistry((value) => logs.push(value), async () => { throw new Error("rpc down") })
+  registry.publish(status("ses_1"))
+  registry.publish(status("ses_2"))
+  await sleep(300)
+  assert.deepEqual(logs.map((value) => [value.event, value.reason]), [["ui-status-failed", "publish-failed"]])
+  registry.dispose()
 })

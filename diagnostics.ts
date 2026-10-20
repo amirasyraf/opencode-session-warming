@@ -1,4 +1,4 @@
-import { appendFile, mkdir, stat } from "node:fs/promises"
+import { appendFile, mkdir, rename, stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 
@@ -16,7 +16,7 @@ export class WarmingFailure extends Error {
 const networkCodes = new Set(["ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT",
   "EPIPE", "ENETUNREACH", "EHOSTUNREACH", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_SOCKET", "UND_ERR_HEADERS_TIMEOUT"])
 const ownCodes = new Set(["metadata-timeout", "logger-timeout", "log-rejected", "unsupported-warm-response",
-  "invalid-sse-json", "invalid-warm-json", "warm-response-too-large", "warm-frame-too-large", "stream-truncated", "stream-failed", "stream-incomplete"])
+  "invalid-sse-json", "invalid-warm-json", "warm-response-too-large", "warm-frame-too-large", "stream-truncated", "stream-failed", "stream-incomplete", "unsupported-content-encoding"])
 const record = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null
 
 export function errorDetails(error: unknown): { errorCategory: string; errorCode?: string } {
@@ -91,6 +91,31 @@ function levelFor(value: Diagnostic): Level {
 
 export function fallbackPath(): string {
   return join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "opencode", "session-warming-fallback.log")
+}
+
+export function logPath(): string {
+  return join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "opencode", "session-warming", "plugin.log")
+}
+
+const LOG_ROTATE_BYTES = 2 * 1024 * 1024
+
+/**
+ * OpenCode V2 gives Promise plugins no host logger, and the background service's stdout is not a log.
+ * Diagnostics therefore go to one private, size-bounded file (current plus one rotated generation).
+ * Entries are already allowlisted metadata.
+ */
+export function fileSink(path = logPath()) {
+  let chain: Promise<unknown> = Promise.resolve()
+  return (entry: LogEntry): Promise<void> => {
+    const write = chain.then(async () => {
+      await mkdir(dirname(path), { recursive: true, mode: 0o700 })
+      const size = await stat(path).then((file) => file.size, () => 0)
+      if (size >= LOG_ROTATE_BYTES) await rename(path, `${path}.1`).catch(() => {})
+      await appendFile(path, JSON.stringify({ timestamp: new Date().toISOString(), pid: process.pid, ...entry }) + "\n", { mode: 0o600 })
+    })
+    chain = write.catch(() => {})
+    return write
+  }
 }
 
 async function appendFallback(entry: LogEntry): Promise<void> {

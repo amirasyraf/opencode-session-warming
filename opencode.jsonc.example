@@ -1,14 +1,17 @@
 {
-  "plugin": [
-    [
-      "file:///absolute/path/to/opencode-session-warming/plugin.ts",
-      {
+  // OpenCode V2 2.1.x. Merge into ~/.config/opencode/opencode.jsonc; keep your other entries.
+  "plugins": [
+    {
+      // The checkout directory (not a file). OpenCode loads server.ts from it, and the CLI
+      // automatically loads tui.tsx from the same directory.
+      "package": "/absolute/path/to/opencode-session-warming",
+      "options": {
         "enabled": true,
         "durationMs": 3600000,
         // Optional: "intervalMs": 1680000,
         "debug": false,
         "providers": {
-          // Optional provider and exact-model overrides go here.
+          // Optional provider and exact API-model overrides go here.
         },
         "journal": {
           "enabled": true,
@@ -16,6 +19,12 @@
           // Optional: "maxBytes": 134217728
         }
       }
-    ]
-  ]
+    }
+  ],
+  // Required for OpenAI: warming captures ordinary requests from OpenCode's HTTP hooks,
+  // which cannot observe the default WebSocket transport.
+  "providers": {
+    "openai": { "settings": { "transport": "http" } }
+  }
+  // Do not set "warming": OpenCode's native warming is mutually exclusive with this plugin.
 }

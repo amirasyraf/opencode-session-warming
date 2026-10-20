@@ -16,6 +16,7 @@ function harness(fetcher: typeof fetch = (async () => completedResponse()) as ty
   const http: Transport = {
     register: (token, capture) => { captures.set(token, capture) },
     remove: (token) => { captures.delete(token) },
+    capture: (token, url, init) => captures.get(token)?.(url, init),
     fetch: (async (url, init) => { requests.push(init!); return fetcher(url, init) }) as typeof fetch,
   }
   const engine = new WarmingEngine({ enabled: true, intervalMs: 100, durationMs: 1000, ...config }, http,

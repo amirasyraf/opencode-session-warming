@@ -1,7 +1,3 @@
-import { randomUUID } from "node:crypto"
-import { mkdir, open, readdir, rename, stat, unlink, writeFile } from "node:fs/promises"
-import { homedir } from "node:os"
-import { join } from "node:path"
 import { errorDetails } from "./diagnostics.ts"
 import type { Diagnostic } from "./diagnostics.ts"
 
@@ -33,10 +29,11 @@ export type WarmStatus = {
   manualStopped?: boolean
   marks: Mark[]
 }
-type Record = { schema: 1; owner: string; pid: number; heartbeatAt: number; status: WarmStatus }
-export type StatusRead = { status?: WarmStatus; unavailable?: "stale" | "invalid" | "read-failed" }
+/** `native` marks a location where OpenCode's built-in `warming` is configured; the plugin stays suspended there. */
+export type StatusRead = { status?: WarmStatus; unavailable?: "invalid" | "read-failed" | "not-loaded"; native?: boolean }
 const RETENTION_MS = 3_600_000
-const MAX_BYTES = 64 * 1024
+const MAX_SESSIONS = 64
+const EMIT_DELAY_MS = 200
 const safeID = (value: string) => /^[A-Za-z0-9_-]{1,128}$/.test(value)
 const number = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0
 const object = (value: unknown): value is { [key: string]: unknown } => typeof value === "object" && value !== null && !Array.isArray(value)
@@ -49,12 +46,8 @@ function safeUsage(value: unknown): UsageStats | undefined {
   return Object.keys(usage).length ? usage : undefined
 }
 
-export function statusDirectory(): string {
-  return join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "opencode", "session-warming", "status")
-}
-
 /** Reconstruct only allowed metadata fields; snapshots, headers, prompts, and errors never enter IPC. */
-function safeStatus(value: unknown): WarmStatus | undefined {
+export function safeStatus(value: unknown): WarmStatus | undefined {
   if (!object(value) || typeof value.sessionID !== "string" || !safeID(value.sessionID) ||
       !["idle", "preparing", "generating", "waiting", "sending", "stopped", "expired"].includes(String(value.phase)) ||
       ![value.startedAt, value.expiresAt, value.intervalMs, value.durationMs, value.attempted, value.completed, value.failed].every(number) ||
@@ -84,126 +77,86 @@ function safeStatus(value: unknown): WarmStatus | undefined {
   }
 }
 
-export async function readStatus(sessionID: string, directory = statusDirectory(), now = Date.now()): Promise<StatusRead> {
-  if (!safeID(sessionID)) return { unavailable: "invalid" }
-  let file
-  try {
-    file = await open(join(directory, `${sessionID}.json`), "r")
-    if ((await file.stat()).size > MAX_BYTES) return { unavailable: "invalid" }
-    const value: unknown = JSON.parse(await file.readFile("utf8"))
-    if (!object(value) || value.schema !== 1 || !number(value.pid) || !value.pid || !number(value.heartbeatAt)) return { unavailable: "invalid" }
-    const status = safeStatus(value.status)
-    if (!status || status.sessionID !== sessionID) return { unavailable: "invalid" }
-    if (now - value.heartbeatAt > 15_000 || value.heartbeatAt > now + 5000) return { unavailable: "stale" }
-    try { process.kill(value.pid, 0) } catch { return { unavailable: "stale" } }
-    return { status }
-  } catch (error) {
-    if (object(error) && error.code === "ENOENT") return {}
-    return { unavailable: error instanceof SyntaxError ? "invalid" : "read-failed" }
-  } finally { await file?.close().catch(() => {}) }
+/** Strip undefined fields so a status survives JSON-Schema validated RPC transfer unchanged. */
+export function wireStatus(status: WarmStatus): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(status)) as Record<string, unknown>
 }
 
-/** Independent, coalesced metadata writes. The warming engine never awaits filesystem work. */
-export class StatusPublisher {
-  private owner = randomUUID()
+/**
+ * In-memory, bounded status table served to the TUI over plugin RPC. Publication is coalesced and
+ * fire-and-forget: the warming engine never awaits it, and emit failures never affect warming.
+ */
+export class StatusRegistry {
   private states = new Map<string, { status: WarmStatus; changedAt: number }>()
-  private pending = new Map<string, WarmStatus>()
-  private work?: Promise<void>
-  private timer?: ReturnType<typeof setInterval>
+  private pending = new Set<string>()
+  private timer?: ReturnType<typeof setTimeout>
+  private emitting = false
   private closed = false
-  private initialized = false
   private warned = false
-  private directory: string
   private log: (diagnostic: Diagnostic) => void
-  constructor(log: (diagnostic: Diagnostic) => void, directory = statusDirectory()) {
+  private emit?: (status: WarmStatus) => Promise<void>
+  constructor(log: (diagnostic: Diagnostic) => void, emit?: (status: WarmStatus) => Promise<void>) {
     this.log = log
-    this.directory = directory
+    this.emit = emit
   }
 
   publish(value: WarmStatus) {
     if (this.closed) return
     const status = safeStatus(value)
     if (!status) return
-    if (!this.states.has(status.sessionID) && this.states.size >= 64) {
+    if (!this.states.has(status.sessionID) && this.states.size >= MAX_SESSIONS) {
       const oldest = this.states.keys().next().value!
       this.states.delete(oldest)
       this.pending.delete(oldest)
-      void this.removeOwned(oldest)
     }
+    this.states.delete(status.sessionID)
     this.states.set(status.sessionID, { status, changedAt: Date.now() })
-    this.pending.set(status.sessionID, status)
+    this.pending.add(status.sessionID)
     if (!this.timer) {
-      this.timer = setInterval(() => {
-        for (const [id, entry] of this.states) {
-          if (!entry.status.manualStopped && (entry.status.phase === "idle" || entry.status.phase === "stopped" || entry.status.phase === "expired") && Date.now() - entry.changedAt > RETENTION_MS) {
-            this.states.delete(id)
-            this.pending.delete(id)
-            void this.removeOwned(id)
-          } else this.pending.set(id, entry.status)
-        }
-        this.drain()
-        if (!this.states.size && this.timer) { clearInterval(this.timer); this.timer = undefined }
-      }, 5000)
-      this.timer.unref()
+      this.timer = setTimeout(() => { this.timer = undefined; void this.drain() }, EMIT_DELAY_MS)
+      this.timer.unref?.()
     }
-    this.drain()
   }
 
-  async flush() {
-    while (this.work) await this.work
+  get(sessionID: string): WarmStatus | undefined {
+    const entry = this.states.get(sessionID)
+    if (!entry) return
+    const inactive = entry.status.phase === "idle" || entry.status.phase === "stopped" || entry.status.phase === "expired"
+    if (!entry.status.manualStopped && inactive && Date.now() - entry.changedAt > RETENTION_MS) {
+      this.states.delete(sessionID); return
+    }
+    return entry.status
   }
 
-  async dispose() {
+  forget(sessionID: string) { this.states.delete(sessionID); this.pending.delete(sessionID) }
+
+  dispose() {
     this.closed = true
-    if (this.timer) clearInterval(this.timer)
+    if (this.timer) clearTimeout(this.timer)
+    this.timer = undefined
     this.pending.clear()
-    await this.flush()
-    await Promise.all([...this.states.keys()].map((id) => this.removeOwned(id)))
     this.states.clear()
   }
 
-  private async removeOwned(id: string) {
-    let handle
+  private async drain() {
+    if (this.emitting || this.closed || !this.emit) { this.pending.clear(); return }
+    this.emitting = true
     try {
-      const file = join(this.directory, `${id}.json`)
-      handle = await open(file, "r")
-      if ((await handle.stat()).size > MAX_BYTES) return
-      const value: unknown = JSON.parse(await handle.readFile("utf8"))
-      if (object(value) && value.owner === this.owner) await unlink(file)
-    } catch { /* Best-effort cleanup; readers also reject stale status. */ }
-    finally { await handle?.close().catch(() => {}) }
-  }
-
-  private drain() {
-    if (this.work || !this.pending.size || this.closed) return
-    this.work = (async () => {
-      if (!this.initialized) {
-        await mkdir(this.directory, { recursive: true, mode: 0o700 })
-        // Bound startup cleanup; active writers refresh mtime every five seconds.
-        for (const name of (await readdir(this.directory)).filter((name) => name.endsWith(".json") || name.endsWith(".tmp")).slice(0, 256)) {
-          const path = join(this.directory, name)
-          const age = await stat(path).then((file) => Date.now() - file.mtimeMs, () => 0)
-          if (age > RETENTION_MS) await unlink(path).catch(() => {})
-        }
-        this.initialized = true
-      }
       while (!this.closed && this.pending.size) {
-        const [id, status] = this.pending.entries().next().value!
+        const id = this.pending.values().next().value!
         this.pending.delete(id)
-        const temporary = join(this.directory, `${id}.${this.owner}.tmp`)
-        const record: Record = { schema: 1, owner: this.owner, pid: process.pid, heartbeatAt: Date.now(), status }
+        const status = this.states.get(id)?.status
+        if (!status) continue
         try {
-          await writeFile(temporary, JSON.stringify(record), { mode: 0o600 })
-          if (!this.closed) await rename(temporary, join(this.directory, `${id}.json`))
-        } finally { await unlink(temporary).catch(() => {}) }
+          await this.emit(status)
+          this.warned = false
+        } catch (error) {
+          if (!this.warned) {
+            this.warned = true
+            try { this.log({ event: "ui-status-failed", reason: "publish-failed", ...errorDetails(error) }) } catch { /* Optional UI. */ }
+          }
+        }
       }
-      this.warned = false
-    })().catch((error: unknown) => {
-      this.pending.clear()
-      if (!this.warned) {
-        this.warned = true
-        try { this.log({ event: "ui-status-failed", reason: "write-failed", ...errorDetails(error) }) } catch { /* Optional UI. */ }
-      }
-    }).finally(() => { this.work = undefined; this.drain() })
+    } finally { this.emitting = false }
   }
 }

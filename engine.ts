@@ -74,6 +74,7 @@ export class WarmingEngine {
   private states = new Map<string, State>()
   private stopped = new Map<string, number>()
   private disposed = false
+  private suspended?: string
   private config: Settings
   private http: Transport
   private log: (diagnostic: Diagnostic) => void
@@ -99,6 +100,16 @@ export class WarmingEngine {
     return this.states.has(sessionID)
   }
 
+  /**
+   * Suspend all warming in this instance (for example while OpenCode's native `warming` is configured).
+   * Suspension releases every snapshot; clearing it never resurrects them.
+   */
+  suspend(reason: string | undefined) {
+    if (this.disposed || this.suspended === reason) return
+    this.suspended = reason
+    if (reason) for (const id of [...this.states.keys()]) this.invalidate(id, reason)
+  }
+
   stop(sessionID: string): ControlResult {
     if (this.disposed) return "unavailable"
     if (this.stopped.has(sessionID)) return "already-stopped"
@@ -120,6 +131,7 @@ export class WarmingEngine {
   startWarming(sessionID: string): ControlResult {
     if (this.disposed) return "unavailable"
     if (!this.config.enabled) return "configured-off"
+    if (this.suspended) return "native-warming"
     const before = this.states.get(sessionID)
     if (before) this.clockCurrent(sessionID, before)
     const state = this.states.get(sessionID)
@@ -168,6 +180,10 @@ export class WarmingEngine {
     metadata: State["metadata"] = {}): string | undefined {
     this.invalidate(sessionID, "ordinary-activity")
     if (this.disposed || !this.config.enabled || !eligible) return
+    if (this.suspended) {
+      this.emit({ event: "skipped", sessionID, ...metadata, providerID: context.providerID, model: context.modelID, reason: this.suspended })
+      this.inactive(sessionID, this.suspended, context); return
+    }
     const policy = resolvePolicy(this.config, context.providerID, context.modelID, initialProfile(context.modelID))
     if (!policy.enabled) {
       this.emit({ event: "skipped", sessionID, ...metadata, providerID: context.providerID, model: context.modelID, reason: "configured-off" })

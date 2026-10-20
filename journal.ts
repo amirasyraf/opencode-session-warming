@@ -7,6 +7,7 @@ import { basename, join } from "node:path"
 import { setImmediate as yieldTurn } from "node:timers/promises"
 import { readSegment, segmentFiles } from "./journal-reader.ts"
 import { count, DAY_MS, diagnosticEvents, identifier, MAX_RECORD_BYTES, MAX_SEGMENT_BYTES, object, PLUGIN_VERSION, safeData } from "./journal-schema.ts"
+import { SUPPORTED_OPENCODE_VERSION_RANGE } from "./compatibility.ts"
 import type { EventRecord, JournalData, JournalOptions, SegmentHeader } from "./journal-schema.ts"
 import type { Diagnostic } from "./diagnostics.ts"
 
@@ -179,7 +180,7 @@ export class Journal {
         offset += bytesWritten
       }
     })
-    this.record({ event: "run.started", pluginVersion: PLUGIN_VERSION, version: "1.18.x",
+    this.record({ event: "run.started", pluginVersion: PLUGIN_VERSION, version: SUPPORTED_OPENCODE_VERSION_RANGE,
       retentionDays: options.retentionDays, maxBytes: options.maxBytes })
     if (!this.startupOnly) {
       this.heartbeat = setInterval(() => { this.health(); this.drain() }, 30_000)

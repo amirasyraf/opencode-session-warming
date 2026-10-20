@@ -1,63 +1,48 @@
-import { CAPTURE_HEADER } from "./protocol.ts"
+import { Buffer } from "node:buffer"
 import { errorDetails } from "./diagnostics.ts"
+import { MAX_BODY_BYTES } from "./protocol.ts"
 
 type Failure = { reason?: string; status?: number; errorCategory?: string; errorCode?: string }
 type Complete = (ok: boolean, failure?: Failure) => void
 export type Observation = { complete?: Complete }
 export type Capture = (url: string, init: RequestInit) => Observation | undefined
+/**
+ * OpenCode V2 exposes ordinary provider traffic through `session.hook("http.request" | "http.response")`.
+ * There is no process-wide fetch shim: the plugin only observes requests the host hands to its hooks, and
+ * warm replays are independent calls through the runtime's current `fetch`.
+ */
 export type Transport = {
   fetch: typeof fetch
   register: (token: string, capture: Capture) => void
   remove: (token: string) => void
-}
-const KEY = Symbol.for("opencode-session-warming.transport.v1")
-
-/** Replace only body-consumption methods; preserve the original response's metadata. */
-function responseView(original: Response, bodyResponse: Response, headers = original.headers): Response {
-  const bodyMethods = new Set(["arrayBuffer", "blob", "bytes", "formData", "json", "text"])
-  return new Proxy(original, {
-    get(target, property) {
-      if (property === "body" || property === "bodyUsed") return Reflect.get(bodyResponse, property, bodyResponse)
-      if (property === "headers") return headers
-      if (property === "clone") return () => {
-        const clone = bodyResponse.clone()
-        for (const key of [...clone.headers.keys()]) clone.headers.delete(key)
-        for (const [key, value] of headers) clone.headers.set(key, value)
-        return responseView(original, clone, clone.headers)
-      }
-      const source = bodyMethods.has(String(property)) ? bodyResponse : target
-      const value: unknown = Reflect.get(source, property, source)
-      return typeof value === "function" ? value.bind(source) : value
-    },
-  })
+  /** Offer a decoded ordinary request to a live registration. Never throws. */
+  capture: (token: string, url: string, init: RequestInit) => Observation | undefined
 }
 
-function complete(observation: Observation, ok: boolean, failure?: Failure) {
+export function complete(observation: Observation, ok: boolean, failure?: Failure) {
   const callback = observation.complete
   observation.complete = undefined
   try { callback?.(ok, failure) } catch { /* Plugin observation never fails ordinary traffic. */ }
 }
 
-export function observeResponse(response: Response, signal: AbortSignal | null | undefined, observation: Observation): Response {
-  if (!response.body) { complete(observation, response.ok); return response }
+/** Wrap only the body stream so ordinary consumers keep pull-based backpressure and cancellation. */
+export function observeResponse(response: Response, observation: Observation): Response {
+  if (!response.ok) { complete(observation, false, { reason: "ordinary-http-error", status: response.status }); return response }
+  if (!response.body) { complete(observation, true); return response }
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
   let finished = false
   const finish = (ok: boolean, failure?: Failure) => {
     if (finished) return
     finished = true
-    signal?.removeEventListener("abort", aborted)
     complete(observation, ok, failure)
   }
-  const aborted = () => finish(false, { reason: "ordinary-aborted" })
-  signal?.addEventListener("abort", aborted, { once: true })
-  if (signal?.aborted) aborted()
   const stream = new ReadableStream<Uint8Array>({
     async pull(controller) {
       try {
         reader ??= response.body!.getReader()
         const chunk = await reader.read()
         if (chunk.done) {
-          finish(response.ok)
+          finish(true)
           reader.releaseLock()
           controller.close()
         } else controller.enqueue(chunk.value)
@@ -74,58 +59,46 @@ export function observeResponse(response: Response, signal: AbortSignal | null |
       } else await response.body!.cancel(reason)
     },
   }, { highWaterMark: 0 })
-  return responseView(response, new Response(stream, {
-    status: response.status,
-    statusText: response.statusText,
-    headers: response.headers,
-  }))
+  return new Response(stream, { status: response.status, statusText: response.statusText, headers: response.headers })
 }
 
-/** Exactly one shared, process-lifetime shim. Disposed instances remove their registrations. */
-export function transport(): Transport {
-  const globals = globalThis as typeof globalThis & { [KEY]?: Transport }
-  if (globals[KEY]) return globals[KEY]
-  const original = globalThis.fetch
-  const registrations = new Map<string, Capture>()
-  const wrapper = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined))
-    const token = headers.get(CAPTURE_HEADER)
-    if (!token) return original(input, init)
-    headers.delete(CAPTURE_HEADER)
-    // Preserve all ordinary fetch options; only our reserved header is removed.
-    const clean = { ...init, headers }
-    const url = input instanceof Request ? input.url : String(input)
-    let observation: Observation | undefined
-    try { observation = registrations.get(token)?.(url, clean) } catch { /* Fail open for ordinary traffic. */ }
+/**
+ * Read a bounded copy of a hooked request body and decode the content encodings OpenCode applies
+ * (`zstd` for ChatGPT, optionally `gzip`). The ordinary request object is cloned, never consumed.
+ */
+export async function readRequest(request: Request): Promise<{ url: string; init: RequestInit } | { reason: string }> {
+  if (request.method.toUpperCase() !== "POST") return { reason: "unsupported-method" }
+  const declared = Number(request.headers.get("content-length") ?? 0)
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) return { reason: "request-too-large" }
+  const raw = new Uint8Array(await request.clone().arrayBuffer())
+  if (raw.byteLength > MAX_BODY_BYTES) return { reason: "request-too-large" }
+  const encoding = request.headers.get("content-encoding")?.trim().toLowerCase() || undefined
+  let decoded: Uint8Array
+  if (encoding === undefined) decoded = raw
+  else {
+    const zlib = globalThis.process?.getBuiltinModule?.("node:zlib") as typeof import("node:zlib") | undefined
+    const limit = { maxOutputLength: MAX_BODY_BYTES + 1 }
     try {
-      const response = await original(input, clean)
-      if (!observation) return response
-      if (!response.ok) { complete(observation, false, { reason: "ordinary-http-error", status: response.status }); return response }
-      try {
-        return observeResponse(response, clean.signal ?? (input instanceof Request ? input.signal : undefined), observation)
-      } catch (error) {
-        complete(observation, false, { reason: "observer-failed", ...errorDetails(error) })
-        return response
-      }
+      if (encoding === "zstd" && zlib?.zstdDecompressSync) decoded = zlib.zstdDecompressSync(raw, limit)
+      else if (encoding === "gzip" && zlib) decoded = zlib.gunzipSync(raw, limit)
+      else return { reason: "unsupported-content-encoding" }
     } catch (error) {
-      const signal = clean.signal ?? (input instanceof Request ? input.signal : undefined)
-      if (observation) complete(observation, false, { ...errorDetails(error),
-        reason: signal?.aborted ? "ordinary-aborted" : "ordinary-fetch-error" })
-      throw error
+      return { reason: (error as { code?: string })?.code === "ERR_BUFFER_TOO_LARGE" ? "request-too-large" : "unsupported-content-encoding" }
     }
-  }) as typeof fetch
-  // Bun's fetch exposes runtime helpers (e.g. preconnect); preserve them.
-  for (const key of Reflect.ownKeys(original)) {
-    if (!["name", "length", "prototype"].includes(String(key))) {
-      try { Object.defineProperty(wrapper, key, Object.getOwnPropertyDescriptor(original, key)!) } catch { /* Optional helper. */ }
-    }
+    if (decoded.byteLength > MAX_BODY_BYTES) return { reason: "request-too-large" }
   }
-  const result: Transport = {
-    fetch: original,
+  return { url: request.url, init: { method: "POST", headers: new Headers(request.headers), body: Buffer.from(decoded).toString("utf8") } }
+}
+
+export function transport(): Transport {
+  const registrations = new Map<string, Capture>()
+  return {
+    // Late-bound so test fixtures and host network policy apply to replays exactly as to ordinary traffic.
+    fetch: ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init)) as typeof fetch,
     register: (token, capture) => { registrations.set(token, capture) },
     remove: (token) => { registrations.delete(token) },
+    capture: (token, url, init) => {
+      try { return registrations.get(token)?.(url, init) } catch { return undefined }
+    },
   }
-  globals[KEY] = result
-  globalThis.fetch = wrapper
-  return result
 }
