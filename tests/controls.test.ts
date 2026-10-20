@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { setImmediate, setTimeout as sleep } from "node:timers/promises"
-import { ControlClient, ControlServer, CONTROL_TIMEOUT_MS, parseWarmingCommand } from "../controls.ts"
+import { ControlClient, ControlServer, CONTROL_TIMEOUT_MS, parseDuration, parseWarmingCommand } from "../controls.ts"
 import type { ControlRequest } from "../controls.ts"
 
 const prefix = "session-warming.control.v1:"
@@ -13,7 +13,11 @@ test("warming parser reserves one exact command and consumes invalid arguments l
   assert.equal(parseWarmingCommand(" /warming stop "), "stop")
   assert.equal(parseWarmingCommand("/warming\tstart"), "start")
   assert.equal(parseWarmingCommand("/warming"), "menu")
-  for (const input of ["/warming restart", "/warming start extra", "/warming\nstop", "/warming stop\nsecret"])
+  assert.deepEqual(parseWarmingCommand("/warming extend"), { action: "extend" })
+  assert.deepEqual(parseWarmingCommand("/warming extend 1h30m"), { action: "extend", durationMs: 5_400_000 })
+  assert.equal(parseDuration("1h30m"), 5_400_000)
+  for (const input of ["/warming restart", "/warming start extra", "/warming extend nope", "/warming extend 1h 30m",
+    "/warming extend 1m1h", "/warming\nstop", "/warming stop\nsecret"])
     assert.equal(parseWarmingCommand(input), "invalid", input)
   for (const input of ["/warming-other stop", "Explain /warming start", "ordinary prompt", "!/warming stop"])
     assert.equal(parseWarmingCommand(input), undefined, input)
@@ -47,7 +51,7 @@ test("control round trip deduplicates both concurrent and completed requests", a
     await new Promise<void>((resolve) => { release = resolve })
     return "started"
   }, async (command) => { replies.push(command) })
-  const body = request()
+  const body = { ...request(), action: "extend" as const, durationMs: 30_000 }
   const command = prefix + JSON.stringify(body)
   const first = server.receive(command)
   const duplicate = server.receive(command)
@@ -68,6 +72,7 @@ test("server validates envelopes and rejects expired, oversized and future reque
   const server = new ControlServer(async () => { calls++; return "started" }, async () => {})
   const body = request()
   for (const value of [{ ...body, action: "reset" }, { ...body, sessionID: "../secret" }, { ...body, headers: "secret" },
+    { ...body, action: "start", durationMs: 30_000 }, { ...body, action: "extend", durationMs: 0 },
     { ...body, deadlineAt: Date.now() - 1 }, { ...body, deadlineAt: Date.now() + CONTROL_TIMEOUT_MS + 10000 }])
     await server.receive(prefix + JSON.stringify(value))
   await server.receive(prefix + "null")

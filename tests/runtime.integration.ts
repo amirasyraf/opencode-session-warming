@@ -186,9 +186,10 @@ test("installed v1 warms blocked parents, preserves OAuth, and stops on cancella
     assert.equal(JSON.stringify(await api(`/session/${id}/message`)).includes(KEEPALIVE), false)
 
     let controlSequence = 0
-    async function control(action: "start" | "stop", sessionID = id) {
+    async function control(action: "start" | "stop" | "extend", sessionID = id, durationMs?: number) {
       const command = "session-warming.control.v1:" + JSON.stringify({ action, sessionID,
-        requestID: `runtime-control-${++controlSequence}`, deadlineAt: Date.now() + 5000 })
+        requestID: `runtime-control-${++controlSequence}`, deadlineAt: Date.now() + 5000,
+        ...(durationMs === undefined ? {} : { durationMs }) })
       await api("/tui/publish", { type: "tui.command.execute", properties: { command } })
     }
     const historyBeforeStop = JSON.stringify(await api(`/session/${id}/message`))
@@ -210,6 +211,10 @@ test("installed v1 warms blocked parents, preserves OAuth, and stops on cancella
     assert.equal(fresh.expiresAt - fresh.startedAt, 6000)
     await waitFor(() => requests.filter((request) => request.session === id && request.warm).length > stoppedCount, "warming after manual start")
     assert.equal(JSON.stringify(await api(`/session/${id}/message`)), historyBeforeStart, "start must not write conversation history")
+    await control("extend", id, 1000)
+    await waitFor(async () => (await readStatus(id, statusPath)).status?.durationMs === 7000, "warming duration extension")
+    const extended = (await readStatus(id, statusPath)).status!
+    assert.equal(extended.expiresAt - extended.startedAt, 7000)
 
     const cancelled = await api("/session", { title: "cancellation integration" })
     const cancelledID = String(cancelled.id)

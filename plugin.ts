@@ -89,7 +89,9 @@ const plugin: Plugin = async ({ client, project }, options = {}) => {
     const before = reverts.get(request.sessionID) ?? expired.get(request.sessionID)?.revert
     if (before !== undefined && before !== JSON.stringify(result.data.revert ?? null)) clear(request.sessionID, "reverted")
     if (!current()) return "expired"
-    return request.action === "stop" ? engine.stop(request.sessionID) : engine.startWarming(request.sessionID)
+    if (request.action === "stop") return engine.stop(request.sessionID)
+    if (request.action === "extend") return engine.extendWarming(request.sessionID, request.durationMs)
+    return engine.startWarming(request.sessionID)
   }, async (command, signal) => {
     const result = await client.tui.publish({ body: { type: "tui.command.execute", properties: { command } }, signal })
     if (result.error) throw new Error("control-delivery-failed")

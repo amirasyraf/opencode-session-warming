@@ -11,7 +11,7 @@ const events = ["run.started", "run.ended", "journal.health", "journal.policy-ob
   "window.started", "window.captured", "window.capture-failed", "window.ended",
   "warm.started", "warm.completed", "warm.failed", "warm.aborted", "warming.skipped",
   "warming.policy-warning", "warming.scheduled", "plugin.disabled", "diagnostics.degraded",
-  "ui.status-failed", "internal.failed", "warming.user-started", "warming.user-stopped"] as const
+  "ui.status-failed", "internal.failed", "warming.user-started", "warming.user-stopped", "warming.user-extended"] as const
 export type JournalEvent = typeof events[number]
 export type JournalData = { event: JournalEvent; [key: string]: Scalar | undefined }
 export type EventRecord = JournalData & {
@@ -42,7 +42,7 @@ const numbers = new Set(["attempt", "status", "elapsedMs", "startedAt", "complet
   "excludedMetadata", "evictedMetadata", "unattributed", "pauseStartedAt", "pauseEndedAt", "dropped"])
 const booleans = new Set(["retryable", "outputLimitReached"])
 const reasons = ["unclassified", "configured-off", "unsupported-transport", "ordinary-activity", "expired", "clock-gap",
-  "user-start", "user-stop", "awaiting-activity",
+  "user-start", "user-stop", "user-extend", "awaiting-activity",
   "disposed", "session-error", "deleted", "reverted", "compacting", "compacted", "compaction", "internal-error",
   "initialization-failed", "observer-failed", "write-failed", "cleanup-failed", "request-timeout", "request-failed",
   "ordinary-transport-failed", "ordinary-aborted", "ordinary-stream-error", "ordinary-stream-cancelled", "ordinary-fetch-error",
@@ -109,5 +109,5 @@ export const diagnosticEvents: Record<string, JournalEvent> = {
   "warm-started": "warm.started", "warm-completed": "warm.completed", "warm-failed": "warm.failed", "warm-aborted": "warm.aborted",
   skipped: "warming.skipped", "policy-warning": "warming.policy-warning", scheduled: "warming.scheduled", disabled: "plugin.disabled",
   "logging-degraded": "diagnostics.degraded", "ui-status-failed": "ui.status-failed", "internal-error": "internal.failed",
-  "warming-started": "warming.user-started", "warming-stopped": "warming.user-stopped",
+  "warming-started": "warming.user-started", "warming-stopped": "warming.user-stopped", "warming-extended": "warming.user-extended",
 }

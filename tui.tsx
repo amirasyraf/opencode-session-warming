@@ -17,6 +17,7 @@ import type { ControlAction, ControlResult } from "./controls.ts"
 const controlMessages: Record<ControlResult | "unconfirmed", string> = {
   started: "Warming started with a fresh window.", stopped: "Warming stopped.",
   "already-started": "Warming is already enabled for this window.", "already-stopped": "Warming is already stopped.",
+  extended: "Warming window extended.", "duration-limit": "Warming cannot be extended any further.",
   "awaiting-activity": "Warming enabled. Awaiting supported model activity.",
   "configured-off": "Warming is disabled by configuration.", unavailable: "Warming controls are unavailable.",
   "not-root": "Warming controls require a root session.", "unsupported-session": "This session's OpenCode version is unsupported.",
@@ -31,15 +32,15 @@ function registerControls(api: TuiPluginApi) {
   })
   const pending = new Set<string>()
   let disposed = false
-  const run = async (action: ControlAction, root = rootSession(api)) => {
+  const run = async (action: ControlAction, root = rootSession(api), durationMs?: number) => {
     if (!root.id) { api.ui.toast({ message: "Open a session to control warming.", variant: "info" }); return }
     const sessionID = root.id
     if (pending.has(sessionID)) { api.ui.toast({ message: "A warming control request is pending.", variant: "info" }); return }
     pending.add(sessionID)
     try {
-      const result = await controls.request(action, sessionID)
+      const result = await controls.request(action, sessionID, durationMs)
       if (!disposed) api.ui.toast({ title: root.parent ? "Parent session warming" : "Warming",
-        message: controlMessages[result], variant: ["started", "stopped", "already-started", "already-stopped", "awaiting-activity"].includes(result) ? "info" : "warning" })
+        message: controlMessages[result], variant: ["started", "stopped", "extended", "already-started", "already-stopped", "awaiting-activity"].includes(result) ? "info" : "warning" })
     } finally { pending.delete(sessionID) }
   }
   const menu = async () => {
@@ -53,6 +54,7 @@ function registerControls(api: TuiPluginApi) {
       options={[
         { title: "Start warming", value: "start", description: "Start a fresh window, or await model activity", disabled: !!active || pending.has(root.id!) },
         { title: "Stop warming", value: "stop", description: "Keep warming stopped until you start it", disabled: status.status?.manualStopped || pending.has(root.id!) },
+        { title: "Extend warming", value: "extend", description: "Add one configured window duration", disabled: !status.status || status.status.phase === "idle" || Date.now() >= status.status.expiresAt || pending.has(root.id!) },
       ]}
       onSelect={(option) => { api.ui.dialog.clear(); void run(option.value, root) }} />)
   }
@@ -65,13 +67,14 @@ function registerControls(api: TuiPluginApi) {
     context.event?.preventDefault()
     context.event?.stopPropagation()
     if (command === "invalid") {
-      api.ui.toast({ message: "Usage: /warming start or /warming stop", variant: "info" })
+      api.ui.toast({ message: "Usage: /warming start, /warming stop, or /warming extend [duration]", variant: "info" })
       return
     }
     editor.extmarks.clear()
     editor.clear()
     if (command === "menu") void menu()
-    else void run(command)
+    else if (typeof command === "string") void run(command)
+    else void run(command.action, undefined, command.durationMs)
   }
   const offCommands = api.keymap.registerLayer({ priority: 100000, commands: [
     { name: "input.submit", hidden: true, run: intercept },
@@ -79,6 +82,7 @@ function registerControls(api: TuiPluginApi) {
     { name: "session-warming.menu", namespace: "palette", title: "Session warming", category: "Session", slashName: "warming", run: () => { void menu() } },
     { name: "session-warming.start", namespace: "palette", title: "Start warming", category: "Session", run: () => { api.ui.dialog.clear(); void run("start") } },
     { name: "session-warming.stop", namespace: "palette", title: "Stop warming", category: "Session", run: () => { api.ui.dialog.clear(); void run("stop") } },
+    { name: "session-warming.extend", namespace: "palette", title: "Extend warming", category: "Session", run: () => { api.ui.dialog.clear(); void run("extend") } },
   ] })
   const offEvent = api.event.on("tui.command.execute", (event) => controls.receive(event.properties.command))
   api.lifecycle.onDispose(() => { disposed = true; offCommands(); offEvent(); controls.dispose(); pending.clear() })

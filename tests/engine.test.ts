@@ -479,6 +479,28 @@ test("user stop preserves a replay and start creates one fresh window without ca
   h.engine.dispose()
 })
 
+test("extension lengthens a live window without resetting state or manual stop", async () => {
+  const h = harness()
+  h.start()(true)
+  await h.clock.advance(100)
+  const windowID = h.statuses.at(-1)?.marks.length
+  assert.equal(h.engine.extendWarming("parent", 250), "extended")
+  const extended = h.statuses.at(-1)!
+  assert.equal(extended.durationMs, 1250)
+  assert.equal(extended.expiresAt, 1250)
+  assert.equal(extended.completed, 1)
+  assert.equal(extended.marks.length, windowID)
+  assert.ok(h.logs.some((entry) => entry.event === "warming-extended" && entry.durationMs === 250))
+  assert.equal(h.engine.extendWarming("parent"), "extended")
+  assert.equal(h.statuses.at(-1)?.durationMs, 2250)
+  h.engine.stop("parent")
+  assert.equal(h.engine.extendWarming("parent", 100), "extended")
+  assert.equal(h.statuses.at(-1)?.manualStopped, true)
+  assert.equal(h.statuses.at(-1)?.expiresAt, 2350)
+  assert.equal(h.engine.extendWarming("parent", 2_147_482_000), "duration-limit")
+  h.engine.dispose()
+})
+
 test("user stop survives new ordinary activity and captures the latest complete input", async () => {
   const h = harness()
   h.start()(true)

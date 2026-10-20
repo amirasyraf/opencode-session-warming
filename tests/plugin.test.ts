@@ -48,7 +48,7 @@ async function harness(get?: (id: string) => Promise<unknown>, overrides: Record
     await hooks["chat.headers"]!(value, out)
     return out.headers
   }
-  return { hooks, headers, logs, control: (action: "start" | "stop", sessionID = "root") => controls!.request(action, sessionID) }
+  return { hooks, headers, logs, control: (action: "start" | "stop" | "extend", sessionID = "root", durationMs?: number) => controls!.request(action, sessionID, durationMs) }
 }
 
 test("root capture follows OAuth routing, excludes children/hidden calls and preserves ordinary parameters", async () => {
@@ -313,6 +313,20 @@ test("session controls stop captures without clearing preparation and restart a 
   assert.equal(wire.length, before + 1)
   assert.ok(h.logs.some((entry) => entry.event === "warming-stopped" && entry.reason === "user-stop"))
   assert.ok(h.logs.some((entry) => entry.event === "warming-started" && entry.reason === "user-start"))
+  await h.hooks.dispose!()
+})
+
+test("session controls extend the active window without replacing its capture", async () => {
+  const h = await harness(undefined, { intervalMs: 100, durationMs: 2000 })
+  const headers = await h.headers()
+  const [url, init] = ordinary()
+  await (await globalThis.fetch(url, { ...init, headers: { ...init.headers, ...headers } })).text()
+  assert.equal(await h.control("extend", "root", 300), "extended")
+  await sleep(10)
+  const status = await readStatus("root")
+  assert.equal(status.status?.durationMs, 2300)
+  assert.equal(status.status?.expiresAt, status.status!.startedAt + 2300)
+  assert.ok(h.logs.some((entry) => entry.event === "warming-extended" && entry.durationMs === 300))
   await h.hooks.dispose!()
 })
 

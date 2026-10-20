@@ -193,7 +193,7 @@ try:
                 os.write(master, b"\x1b[200~/warming invalid\x1b[201~")
                 time.sleep(0.1)
                 os.write(master, b"\r")
-            elif control_stage == "invalid" and "Usage: /warming start or /warming stop" in text and "/warming invalid" in text:
+            elif control_stage == "invalid" and "Usage:" in text and "extend [duration]" in text and "/warming invalid" in text:
                 control_invalid = True
                 control_stage = "menu"
                 body = json.dumps({"type": "tui.command.execute", "properties": {"command": "prompt.clear"}}).encode()

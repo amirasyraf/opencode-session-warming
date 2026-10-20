@@ -1,19 +1,45 @@
 import { randomUUID } from "node:crypto"
 import { within } from "./diagnostics.ts"
+import { MAX_TIMER } from "./cache-policy.ts"
 
 export const CONTROL_TIMEOUT_MS = 5000
 const MAX_BYTES = 1024
 const REQUEST_PREFIX = "session-warming.control.v1:"
 const ACK_PREFIX = "session-warming.ack.v1:"
-export type ControlAction = "start" | "stop"
+export type ControlAction = "start" | "stop" | "extend"
 export type ControlResult = "started" | "stopped" | "already-started" | "already-stopped" | "awaiting-activity" |
-  "configured-off" | "unavailable" | "not-root" | "unsupported-session" | "busy" | "expired"
-export type ControlRequest = { requestID: string; sessionID: string; action: ControlAction; deadlineAt: number }
+  "extended" | "duration-limit" | "configured-off" | "unavailable" | "not-root" | "unsupported-session" | "busy" | "expired"
+export type ControlRequest = { requestID: string; sessionID: string; action: ControlAction; deadlineAt: number; durationMs?: number }
 type Acknowledgement = ControlRequest & { result: ControlResult }
 type Send = (command: string, signal: AbortSignal) => Promise<void>
 const results: ControlResult[] = ["started", "stopped", "already-started", "already-stopped", "awaiting-activity",
-  "configured-off", "unavailable", "not-root", "unsupported-session", "busy", "expired"]
+  "extended", "duration-limit", "configured-off", "unavailable", "not-root", "unsupported-session", "busy", "expired"]
 const id = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value)
+
+export type WarmingCommand = ControlAction | "menu" | "invalid" | { action: "extend"; durationMs?: number }
+
+/** Parse a bounded ASCII duration without accepting locale, decimal, or whitespace variants. */
+export function parseDuration(value: string): number | undefined {
+  if (!value) return
+  const units: Record<string, number> = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }
+  let total = 0
+  let end = 0
+  let previous = Infinity
+  const seen = new Set<string>()
+  for (const match of value.matchAll(/(\d+)([smhd])/g)) {
+    if (match.index !== end) return
+    const unit = match[2]!
+    const amount = Number(match[1])
+    const milliseconds = amount * units[unit]!
+    if (!Number.isSafeInteger(amount) || !Number.isSafeInteger(milliseconds) || seen.has(unit) || units[unit]! >= previous ||
+        total > MAX_TIMER - milliseconds) return
+    total += milliseconds
+    previous = units[unit]!
+    seen.add(unit)
+    end += match[0].length
+  }
+  return end === value.length && total > 0 ? total : undefined
+}
 
 /** This envelope contains only reconstructed control metadata, never prompt/editor text. */
 function decode(command: string, prefix: string, acknowledgement = false): Acknowledgement | ControlRequest | undefined {
@@ -21,22 +47,28 @@ function decode(command: string, prefix: string, acknowledgement = false): Ackno
   try {
     const value = JSON.parse(command.slice(prefix.length)) as Record<string, unknown>
     if (!value || typeof value !== "object" || Array.isArray(value) || !id(value.requestID) || !id(value.sessionID) ||
-        !["start", "stop"].includes(String(value.action)) || !Number.isSafeInteger(value.deadlineAt) || Number(value.deadlineAt) < 0 ||
-        Object.keys(value).some((key) => !["requestID", "sessionID", "action", "deadlineAt", ...(acknowledgement ? ["result"] : [])].includes(key))) return
+        !["start", "stop", "extend"].includes(String(value.action)) || !Number.isSafeInteger(value.deadlineAt) || Number(value.deadlineAt) < 0 ||
+        (value.durationMs !== undefined && (value.action !== "extend" || typeof value.durationMs !== "number" || !Number.isSafeInteger(value.durationMs) || value.durationMs <= 0 || value.durationMs > MAX_TIMER)) ||
+        Object.keys(value).some((key) => !["requestID", "sessionID", "action", "deadlineAt", "durationMs", ...(acknowledgement ? ["result"] : [])].includes(key))) return
     const request: ControlRequest = { requestID: value.requestID, sessionID: value.sessionID,
-      action: value.action as ControlAction, deadlineAt: value.deadlineAt as number }
+      action: value.action as ControlAction, deadlineAt: value.deadlineAt as number,
+      ...(value.durationMs === undefined ? {} : { durationMs: value.durationMs as number }) }
     if (!acknowledgement) return request
     if (!results.includes(value.result as ControlResult)) return
     return { ...request, result: value.result as ControlResult }
   } catch { return }
 }
 
-export function parseWarmingCommand(text: string): ControlAction | "menu" | "invalid" | undefined {
+export function parseWarmingCommand(text: string): WarmingCommand | undefined {
   const input = text.trim()
   if (!/^\/warming(?:\s|$)/.test(input)) return
   if (input === "/warming") return "menu"
-  const match = /^\/warming[ \t]+(start|stop)[ \t]*$/.exec(input)
-  return match ? match[1] as ControlAction : "invalid"
+  const match = /^\/warming[ \t]+(start|stop|extend)(?:[ \t]+([^ \t]+))?[ \t]*$/.exec(input)
+  if (!match) return "invalid"
+  if (match[1] !== "extend") return match[2] === undefined ? match[1] as ControlAction : "invalid"
+  if (match[2] === undefined) return { action: "extend" }
+  const durationMs = parseDuration(match[2])
+  return durationMs === undefined ? "invalid" : { action: "extend", durationMs }
 }
 
 /** Acknowledgement is required: HTTP acceptance alone does not prove the action was applied. */
@@ -46,10 +78,11 @@ export class ControlClient {
   private send: Send
   constructor(send: Send) { this.send = send }
 
-  request(action: ControlAction, sessionID: string): Promise<ControlResult | "unconfirmed"> {
+  request(action: ControlAction, sessionID: string, durationMs?: number): Promise<ControlResult | "unconfirmed"> {
     if (this.closed || !id(sessionID)) return Promise.resolve("unavailable")
     if (this.pending.size >= 8) return Promise.resolve("busy")
-    const request: ControlRequest = { requestID: randomUUID(), sessionID, action, deadlineAt: Date.now() + CONTROL_TIMEOUT_MS }
+    const request: ControlRequest = { requestID: randomUUID(), sessionID, action, deadlineAt: Date.now() + CONTROL_TIMEOUT_MS,
+      ...(durationMs === undefined ? {} : { durationMs }) }
     return new Promise((resolve) => {
       const controller = new AbortController()
       const timer = setTimeout(() => finish("unconfirmed"), CONTROL_TIMEOUT_MS)
@@ -73,7 +106,7 @@ export class ControlClient {
     if (!ack) return
     const entry = this.pending.get(ack.requestID)
     if (!entry || entry.request.sessionID !== ack.sessionID || entry.request.action !== ack.action ||
-        entry.request.deadlineAt !== ack.deadlineAt || Date.now() >= ack.deadlineAt) return
+        entry.request.deadlineAt !== ack.deadlineAt || entry.request.durationMs !== ack.durationMs || Date.now() >= ack.deadlineAt) return
     entry.finish(ack.result)
   }
 
@@ -106,7 +139,7 @@ export class ControlServer {
     const existing = this.entries.get(request.requestID)
     if (existing) {
       if (existing.request.sessionID !== request.sessionID || existing.request.action !== request.action ||
-          existing.request.deadlineAt !== request.deadlineAt) return
+          existing.request.deadlineAt !== request.deadlineAt || existing.request.durationMs !== request.durationMs) return
       if (existing.result) await this.acknowledge(request, existing.result)
       return
     }

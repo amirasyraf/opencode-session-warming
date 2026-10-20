@@ -132,7 +132,7 @@ not claim a cache hit or a cost saving after a request completes.
    scheduling warming. Stopping the agent keeps warming the captured input
    until the original window expires; it does not restart the timer.
 4. A supported request is replayed directly to its provider at the selected
-   interval, until the fixed window expires.
+   interval, until the window expires. You can extend a live window explicitly.
 5. New ordinary activity, compaction, revert, deletion, non-cancellation errors,
    disposal, sleep/resume gaps, and incompatible responses stop the snapshot.
    A resumed root-model request can establish a fresh window after expiry.
@@ -147,11 +147,12 @@ With both plugins enabled, use these commands in a session:
 | --- | --- |
 | `/warming stop` | Abort the current warm request and keep warming stopped until you start it. |
 | `/warming start` | Start a fresh window using the latest valid snapshot, or wait for supported model activity. |
+| `/warming extend [duration]` | Add the specified duration to the current window. With no duration, add one configured window duration. |
 | `/warming` | Open the warming action menu. |
 
-The command palette also has **Start warming** and **Stop warming** actions. In a child view, they control its root parent and label the feedback accordingly. Commands execute directly without creating an assistant turn or writing session history.
+The command palette also has **Start warming**, **Stop warming**, and **Extend warming** actions. In a child view, they control its root parent and label the feedback accordingly. Commands execute directly without creating an assistant turn or writing session history.
 
-Ordinary requests continue while warming is stopped and can supply a newer snapshot. The retained snapshot stays in RAM only until its existing expiry. Starting resets current-window statistics and progress, then schedules the first warm request one interval later. It waits for any ongoing ordinary response to finish. Starting an already enabled window does nothing.
+Ordinary requests continue while warming is stopped and can supply a newer snapshot. The retained snapshot stays in RAM only until its existing expiry. Starting resets current-window statistics and progress, then schedules the first warm request one interval later. It waits for any ongoing ordinary response to finish. Starting an already enabled window does nothing. Durations accept values such as `30m`, `1h`, or `1h30m`; extensions do not reset statistics or replay state.
 
 Start cannot recover an expired or invalidated snapshot, bypass configuration, or refresh credentials. When no valid snapshot remains, the indicator shows **Awaiting activity** until a supported ordinary request arrives. Stop lasts for the running server instance; restarting OpenCode clears it. Resetting window statistics does not delete journal history.
 

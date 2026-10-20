@@ -76,11 +76,13 @@ test("manual controls and renewed windows retain earlier journal history without
     journal.diagnostic({ event: "window-ended", sessionID: "root", windowID: "original", reason: "user-start" })
     journal.diagnostic({ event: "window-started", sessionID: "root", windowID: "fresh", reason: "user-start" })
     journal.diagnostic({ event: "warming-started", sessionID: "root", windowID: "fresh", reason: "user-start", authorization: "secret" })
+    journal.diagnostic({ event: "warming-extended", sessionID: "root", windowID: "fresh", reason: "user-extend", durationMs: 300000, expiresAt: 900000 })
     await journal.dispose()
     const data = await records(root)
     assert.equal(data.filter((item) => item.event === "window.started").length, 2)
     assert.equal(data.find((item) => item.event === "warming.user-stopped")?.reason, "user-stop")
     assert.equal(data.find((item) => item.event === "warming.user-started")?.windowID, "fresh")
+    assert.equal(data.find((item) => item.event === "warming.user-extended")?.durationMs, 300000)
     assert.equal(JSON.stringify(data).includes("secret"), false)
   } finally { await journal.dispose(); await rm(root, { recursive: true, force: true }) }
 })
