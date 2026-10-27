@@ -8,6 +8,7 @@ import { zstdCompressSync, zstdDecompressSync } from "node:zlib"
 import plugin from "../server.ts"
 import { CODEX_ENDPOINT, KEEPALIVE } from "../protocol.ts"
 import { completedResponse, requestBody } from "./helpers.ts"
+import { disposeResidents } from "../resident.ts"
 
 const stateHome = await mkdtemp(join(tmpdir(), "warming-server-unit-"))
 const previousStateHome = process.env.XDG_STATE_HOME
@@ -22,7 +23,8 @@ after(async () => {
 })
 
 const active = new Set<() => Promise<void>>()
-async function disposeAll() { for (const cleanup of [...active]) await cleanup() }
+// Scope disposal parks live windows, so tests also release the process-scoped residents.
+async function disposeAll() { for (const cleanup of [...active]) await cleanup(); await disposeResidents() }
 
 type Warm = { url: string; headers: Headers; body: Record<string, unknown> }
 const warms: Warm[] = []
@@ -37,10 +39,10 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 type Hook = { name: string; callback: (event: any) => unknown; providerID?: string }
 const model = { providerID: "openai", id: "alias", variant: "default" }
 
-async function harness(overrides: Record<string, unknown> = {}, app = { name: "opencode", version: "2.1.0", channel: "latest" }) {
-  // A failed assertion must not leave an earlier harness warming into later tests.
-  await disposeAll()
-  warms.length = 0
+async function harness(overrides: Record<string, unknown> = {}, app = { name: "opencode", version: "2.1.0", channel: "latest" },
+  reload = false) {
+  // A failed assertion must not leave an earlier harness warming into later tests. A reload keeps residents.
+  if (!reload) { await disposeAll(); warms.length = 0 }
   const hooks: Hook[] = []
   const emitted: Record<string, unknown>[] = []
   const queue: unknown[] = []
@@ -231,7 +233,7 @@ test("RPC extend lengthens the live window without replacing its capture or writ
   assert.equal((await h.rpc("control", { requestID: "e4", sessionID: "other", action: "extend" })).result, "awaiting-activity")
   assert.equal((await h.rpc("control", { requestID: "e5", sessionID: "root", action: "start", durationMs: 300 })).result, "unavailable")
   assert.equal((await h.rpc("control", { requestID: "e6", sessionID: "root", action: "extend", durationMs: 0 })).result, "unavailable")
-  await h.cleanup?.()
+  await disposeAll()
   const log = await readFile(join(stateHome, "opencode", "session-warming", "plugin.log"), "utf8")
   assert.match(log, /warming-extended/)
 })
@@ -275,4 +277,54 @@ test("capture failures fail open and never alter the ordinary request", async ()
   assert.equal(request.bodyUsed, false)
   assert.equal((await h.rpc("status", { sessionID: "root" })).status.reason, "unsupported-content-encoding")
   await h.cleanup?.()
+})
+
+test("location disposal parks live windows; the reloaded scope re-attaches without a new capture", async () => {
+  const h = await harness()
+  await h.ordinary("root")
+  await sleep(150)
+  const before = (await h.rpc("status", { sessionID: "root" })).status
+  await h.cleanup?.() // OpenCode's idle location eviction disposes the plugin scope.
+  const parked = h.warmsFor("root").length
+  await sleep(200)
+  assert.ok(h.warmsFor("root").length > parked, "a parked window keeps warming")
+  const next = await harness({}, undefined, true)
+  const after = (await next.rpc("status", { sessionID: "root" })).status
+  assert.equal(after.startedAt, before.startedAt, "same window")
+  assert.equal(after.expiresAt, before.expiresAt)
+  assert.ok(after.completed > before.completed, "statistics carry over")
+  // Root metadata carries over, so session events still reach the adopted window.
+  next.publish({ type: "session.revert.staged", data: { sessionID: "root" } })
+  await sleep(20)
+  assert.equal((await next.rpc("status", { sessionID: "root" })).status.reason, "reverted")
+  const stopped = next.warmsFor("root").length
+  await sleep(150)
+  assert.equal(next.warmsFor("root").length, stopped)
+  await next.cleanup?.()
+})
+
+test("a parked resident is released when its windows expire, options change, or the plugin is disabled", async () => {
+  const h = await harness({ durationMs: 300 })
+  await h.ordinary("root")
+  await h.cleanup?.()
+  await sleep(400)
+  const expired = h.warmsFor("root").length
+  await sleep(150)
+  assert.equal(h.warmsFor("root").length, expired, "expiry ends a parked window")
+  const fresh = await harness({ durationMs: 300 }, undefined, true)
+  assert.equal((await fresh.rpc("status", { sessionID: "root" })).status, undefined, "an expired resident is not adopted")
+  for (const [options, label] of [[{ intervalMs: 50 }, "options change"], [{ enabled: false }, "disabled"]] as const) {
+    const first = await harness()
+    await first.ordinary("root")
+    await first.cleanup?.()
+    const next = await harness(options, undefined, true)
+    await sleep(20)
+    const count = first.warmsFor("root").length
+    await sleep(150)
+    assert.equal(first.warmsFor("root").length, count, label)
+    if (next.cleanup) {
+      assert.equal((await next.rpc("status", { sessionID: "root" })).status, undefined, label)
+      await next.cleanup()
+    }
+  }
 })

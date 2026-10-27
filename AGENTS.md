@@ -50,6 +50,7 @@ Keep responsibilities in their current modules:
 - `cache-policy.ts`: model floors, defaults, overrides, and precedence.
 - `engine.ts`: scheduling, invalidation, retries, and warm lifecycle.
 - `server.ts`: V2 hook registration, root/model resolution, session events, RPC handlers.
+- `resident.ts`: the process-scoped, per-location resident pool that lets live windows outlive a plugin scope.
 - `status.ts`, `indicator.ts`, `tui.tsx`: in-memory status registry, observational rendering, and explicit CLI command handling.
 - `controls.ts`, `rpc.ts`: bounded, metadata-only control requests and the RPC contract.
 - `journal-schema.ts`, `journal.ts`, `journal-reader.ts`, `journal-cli.ts`:
@@ -58,6 +59,34 @@ Keep responsibilities in their current modules:
 
 Do not replace this with a generic provider framework, persistent conversation
 store, background daemon, task counter, or conversation reconstruction layer.
+
+## Location lifetime invariants
+
+- OpenCode 2.1.x invalidates a location's service graph (and every plugin scope)
+  after a fixed, unconfigurable 60 minutes without durable `SessionEvent`s
+  (`packages/core/src/location-activity.ts`) and reloads it on the next request,
+  such as the CLI's two-second status poll. Warming, plugin RPC, and status
+  polling are not durable activity. Never fabricate session activity to keep a
+  location alive.
+- The engine, its transport registrations, the journal, the resident's
+  diagnostics, root/model/recovery caches, and the native flag belong to a
+  per-location resident on `globalThis` (`resident.ts`). Hooks, RPC handlers,
+  controls, the ordinary observer, preparations, and the status registry stay
+  per scope. Scope disposal detaches; it must not dispose live windows.
+- The last detaching scope parks a resident that still has live windows
+  (including manually stopped ones). A parked engine keeps warming and expiring
+  under the normal rules and releases itself (engine and journal disposal) when
+  its last window ends. Only the process exiting ends it otherwise.
+- A new scope re-attaches only to a resident with the same fingerprint
+  (`RESIDENT_VERSION` plus the raw plugin options) and republishes its live
+  windows to the new status registry. A mismatch, a disabled plugin, or an
+  unsupported host disposes the parked resident with reason `disposed`.
+  Residents from older plugin code persist across reloads, so keep the pool
+  contract (`fingerprint`, `scopes`, `idle`, `watchIdle`, `dispose`) fixed and
+  bump `RESIDENT_VERSION` whenever anything else an attaching scope uses
+  changes.
+- Removing the plugin from config cannot be observed: a parked window then runs
+  until its expiry. Document this rather than capping parked lifetime.
 
 ## Transport and session invariants
 
@@ -137,7 +166,12 @@ store, background daemon, task counter, or conversation reconstruction layer.
 - Fence retries, late callbacks, expiry, disposal, and cancellation. None may
   resurrect state or extend the ordinary activity window.
 - Treat substantially late timers as sleep/resume or clock-gap events. Discard
-  stale warming before sending or retrying. Do not send catch-up bursts.
+  stale warming before sending or retrying. Do not send catch-up bursts. The
+  only exception is a late scheduler wakeup of a waiting snapshot (no warm or
+  ordinary request in flight) whose selected `ttlMs` has not elapsed since the
+  last request start assumed to refresh the cache (ordinary capture or
+  successful warm): it sends at most one immediate warm (`resume-within-ttl`).
+  Unknown TTLs and in-flight work stay strict.
 - Every warm attempt emits one terminal outcome, including invalidation,
   replacement, and late-response paths. This is not exactly-once persistence
   and does not guarantee remote cancellation.
@@ -148,7 +182,7 @@ store, background daemon, task counter, or conversation reconstruction layer.
 - Rendering remains observational. Only explicit user commands change the engine. Child views target their root parent (`data.session.root`) and label it; the server independently checks root metadata. Never route controls through `session.command`, `session.prompt`, `session.generate`, an agent, or a tool.
 - The control and status bridge is the `session-warming` plugin RPC (`status`, `control`, `native` methods; `status` event), called with the root session's `location`. RPC registrations are per location instance. Inputs allow only session ID, request ID, action, an optional bounded `durationMs` (accepted only for `extend`), and the native flag. Never send editor contents or authenticated snapshots.
 - The RPC response is the correlated acknowledgement. Client calls expire after five seconds; the server assigns its own deadline, rechecks liveness after asynchronous metadata lookups and before mutation, orders actions per session, bounds pending work and deduplication, and fences deletion/disposal. Duplicate request IDs cannot apply an action twice.
-- Manual stop is separate from snapshot validity. Stop aborts warming, retains the snapshot only until its existing expiry, and persists across new ordinary activity in the running instance. Fresh ordinary captures remain admissible while stopped. Deletion and disposal clear the stopped preference; do not silently evict it to enable a session.
+- Manual stop is separate from snapshot validity. Stop aborts warming, retains the snapshot only until its existing expiry, and persists across new ordinary activity while the location's resident lives. Fresh ordinary captures remain admissible while stopped. Deletion and resident disposal clear the stopped preference; do not silently evict it to enable a session.
 - A manual start of a stopped, live state explicitly opens a new configured-duration window with new window identity and zeroed current-window statistics. Its first warm target is one interval later. Wait for ongoing ordinary transport completion. Starting an already enabled window is a no-op; absent or invalidated captures become enabled/awaiting activity, never reconstructed from history.
 - `/warming extend [duration]` lengthens the existing live window (including a manually stopped one) without resetting its window identity, snapshot, statistics, or next warm target; status `durationMs` is the extended window length. Bare `extend` adds one configured duration; explicit ASCII durations may combine strictly descending `d`/`h`/`m`/`s` units such as `1h30m`. Extensions are bounded by the safe timer limit (`duration-limit`), do not resurrect expired or invalidated state, and preserve manual-stop state. A fresh window (ordinary capture or manual start) resets the length to the configured duration.
 - Expiry, clock gaps, authentication failure, incompatible input, compaction, revert, and other invalidations still release snapshots and pending capture callbacks while manually stopped. Start must not resurrect them or bypass configured policy. Fence warm continuations by controller identity as well as state identity.

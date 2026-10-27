@@ -166,10 +166,23 @@ not claim a cache hit or a cost saving after a request completes.
 4. A supported request is replayed directly to its provider at the selected
    interval, until the window expires. You can extend a live window explicitly.
 5. New ordinary activity, compaction, revert, deletion, non-cancellation errors,
-   disposal, sleep/resume gaps, and incompatible responses stop the snapshot.
+   long sleep/resume gaps, and incompatible responses stop the snapshot.
    A retried root-model request can establish a fresh window after expiry.
 
-The plugin never sends catch-up bursts after sleep. Once a snapshot expires or is invalidated, a fresh ordinary request is required to capture a replayable input again.
+OpenCode unloads an idle project, with its plugins, after 60 minutes without
+chat activity. Warming does not count as activity, but a live window keeps
+warming in the background and the plugin picks it up again when the project
+reloads, so a multi-hour window lasts its full duration. Restarting OpenCode,
+changing the plugin's options, or editing the plugin code still ends it. If you
+remove the plugin from your config mid-window, the old window keeps warming
+until it expires.
+
+After sleep, the plugin never sends catch-up bursts. If the computer wakes before
+the provider's assumed cache lifetime has run out (for example, 30 minutes since
+the last GPT request), it sends one warm request and continues. Otherwise the
+cache is presumed cold and the snapshot is dropped. Once a snapshot expires or is
+invalidated, a fresh ordinary request is required to capture a replayable input
+again.
 
 ## Session controls
 

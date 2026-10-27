@@ -12,6 +12,10 @@ import { Journal } from "./journal.ts"
 import { OrdinaryObserver } from "./ordinary-observer.ts"
 import { ControlServer, controlRequest } from "./controls.ts"
 import { WarmingRpc } from "./rpc.ts"
+import type { WarmStatus } from "./status.ts"
+import type { Transport } from "./transport.ts"
+import { attach, detach, discard, fingerprint, locationKey } from "./resident.ts"
+import type { Resident } from "./resident.ts"
 
 type Ref = { readonly providerID: string; readonly id: string }
 type Preparation = { token?: string; done: Promise<void> }
@@ -27,6 +31,53 @@ function bounded<K, V>(map: Map<K, V>, key: K, value: V) {
   while (map.size > MAX_TRACKED) map.delete(map.keys().next().value!)
 }
 
+/**
+ * Location-level warming state that outlives a plugin scope (see resident.ts): the engine and its transport
+ * registrations, the journal, and metadata caches. Hooks, RPC handlers, controls, and status rendering stay per scope.
+ */
+type WarmingResident = Resident & {
+  engine: WarmingEngine
+  http: Transport
+  journal?: Journal
+  log: ReturnType<typeof createDiagnostics>
+  diagnostic: (value: Diagnostic) => void
+  publishers: Set<(status: WarmStatus) => void>
+  roots: Map<string, boolean>
+  models: Map<string, string>
+  recoveries: Map<string, Recovery>
+  native: boolean
+}
+
+function createResident(config: NonNullable<ReturnType<typeof settings>>, options: Record<string, unknown>, print: string,
+  projectID: string | undefined): WarmingResident {
+  let journal: Journal | undefined
+  const log = createDiagnostics(fileSink(), { debug: options.debug === true, onDegraded: (value) => journal?.diagnostic(value) })
+  const diagnostic = (extra: Diagnostic) => { journal?.diagnostic(extra); log(extra) }
+  if (config.journal?.enabled) journal = new Journal(config.journal, log, { projectID })
+  const http = transport()
+  const publishers = new Set<(status: WarmStatus) => void>()
+  let engine: WarmingEngine
+  try {
+    engine = new WarmingEngine(config, http, diagnostic, undefined, (status) => { for (const publish of publishers) publish(status) })
+  } catch (error) {
+    void journal?.dispose()
+    throw error
+  }
+  let disposed = false
+  return { fingerprint: print, scopes: 0, engine, http, journal, log, diagnostic, publishers,
+    roots: new Map(), models: new Map(), recoveries: new Map(), native: false,
+    idle: () => engine.size === 0,
+    watchIdle: (callback) => { engine.onEmpty = callback },
+    dispose: async () => {
+      if (disposed) return
+      disposed = true
+      engine.dispose()
+      await within(async () => { await journal?.dispose() }, 2000, "metadata-timeout").catch((error: unknown) => {
+        log({ event: "ui-status-failed", reason: "cleanup-failed", ...errorDetails(error) })
+      })
+    } }
+}
+
 const sessionID = (data: unknown): string | undefined =>
   typeof data === "object" && data !== null && typeof (data as { sessionID?: unknown }).sessionID === "string"
     ? (data as { sessionID: string }).sessionID : undefined
@@ -34,45 +85,44 @@ const sessionID = (data: unknown): string | undefined =>
 /**
  * OpenCode V2 server plugin. Ordinary root-session provider requests are observed through the session
  * `http.request` / `http.response` hooks (scoped to OpenAI and GitHub Copilot); warm replays are independent
- * HTTP calls. The TUI plugin talks to this instance only through the `session-warming` plugin RPC.
+ * HTTP calls. The TUI plugin talks to this instance only through the `session-warming` plugin RPC. The engine
+ * belongs to the location's process-scoped resident, so live windows survive OpenCode's idle location eviction.
  */
 export default {
   id: "session-warming",
   async setup(ctx: Plugin.Context) {
     const options = (ctx.options ?? {}) as Record<string, unknown>
-    let journal: Journal | undefined
-    const log = createDiagnostics(fileSink(), { debug: options.debug === true, onDegraded: (value) => journal?.diagnostic(value) })
-    const diagnostic = (extra: Diagnostic) => { journal?.diagnostic(extra); log(extra) }
+    const key = locationKey(ctx.location)
     const config = settings(options)
+    const disabled = (value: Diagnostic) => createDiagnostics(fileSink(), { debug: options.debug === true })(value)
     if (!config || !config.enabled) {
-      diagnostic({ event: "disabled", reason: !config ? settingsError(options) : "configured-off" })
+      await discard(key)
+      disabled({ event: "disabled", reason: !config ? settingsError(options) : "configured-off" })
       return
     }
     if (!isSupportedOpenCodeVersion(ctx.app.version)) {
-      diagnostic({ event: "disabled", reason: "unsupported-opencode-version", version: ctx.app.version })
+      await discard(key)
+      disabled({ event: "disabled", reason: "unsupported-opencode-version", version: ctx.app.version })
       return
     }
-    const projectID = ctx.location?.project?.id
-    if (config.journal?.enabled) journal = new Journal(config.journal, log, { projectID })
 
-    const http = transport()
+    let resident: WarmingResident
+    let adopted: boolean
+    try {
+      ({ resident, adopted } = attach(key, fingerprint(options), () => createResident(config, options, fingerprint(options), ctx.location?.project?.id)))
+    } catch (error) {
+      disabled({ event: "internal-error", reason: "initialization-failed", ...errorDetails(error) })
+      return
+    }
+    const { engine, http, journal, log, diagnostic, roots, models, recoveries } = resident
     let emit: ((status: Record<string, unknown>, id: string) => Promise<void>) | undefined
     const registry = new StatusRegistry(diagnostic, (status) => emit ? emit(wireStatus(status), status.sessionID) : Promise.resolve())
-    let engine: WarmingEngine
-    let ordinary: OrdinaryObserver
-    try {
-      engine = new WarmingEngine(config, http, diagnostic, undefined, (status) => registry.publish(status))
-      ordinary = new OrdinaryObserver(journal, (id, usage) => engine.recordOrdinaryUsage(id, usage))
-    } catch (error) {
-      diagnostic({ event: "internal-error", reason: "initialization-failed", ...errorDetails(error) })
-      registry.dispose(); await journal?.dispose(); return
-    }
+    const publish = (status: WarmStatus) => registry.publish(status)
+    resident.publishers.add(publish)
+    const ordinary = new OrdinaryObserver(journal, (id, usage) => engine.recordOrdinaryUsage(id, usage))
 
     let disposed = false
-    const roots = new Map<string, boolean>()
-    const models = new Map<string, string>()
     const preparations = new Map<string, Preparation>()
-    const recoveries = new Map<string, Recovery>()
     const inflight = new Map<string, Observation>()
 
     const clear = (id: string, reason: string) => {
@@ -155,7 +205,6 @@ export default {
       return token
     }
 
-    let nativeWarming = false
     const controls = new ControlServer(async (request, current) => {
       const info = await within((signal) => ctx.session.get({ sessionID: request.sessionID }, { signal }),
         Math.max(1, request.deadlineAt - Date.now()), "metadata-timeout").catch(() => undefined)
@@ -172,7 +221,7 @@ export default {
       status: async (input) => {
         const id = (input as { sessionID?: unknown })?.sessionID
         const status = typeof id === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(id) ? registry.get(id) : undefined
-        return { ...(status ? { status: wireStatus(status) } : {}), native: nativeWarming }
+        return { ...(status ? { status: wireStatus(status) } : {}), native: resident.native }
       },
       control: async (input) => {
         const request = controlRequest(input)
@@ -180,8 +229,8 @@ export default {
       },
       native: async (input) => {
         const enabled = (input as { enabled: boolean }).enabled === true
-        if (enabled !== nativeWarming) {
-          nativeWarming = enabled
+        if (enabled !== resident.native) {
+          resident.native = enabled
           diagnostic({ event: enabled ? "suspended" : "resumed", reason: "native-warming" })
           engine.suspend(enabled ? "native-warming" : undefined)
         }
@@ -279,21 +328,22 @@ export default {
       }
     })()
 
+    // A re-attached resident announces its live windows to this scope's status registry.
+    if (adopted) { diagnostic({ event: "adopted", reason: "location-reloaded" }); engine.republish() }
     diagnostic({ event: "ready", version: SUPPORTED_OPENCODE_VERSION_RANGE, intervalMs: config.intervalMs,
       intervalSource: config.intervalMs === undefined ? "automatic" : "global",
       durationMs: config.durationMs, timeoutMs: 30000, metadataTimeoutMs: METADATA_TIMEOUT_MS })
 
+    // Scope disposal (including OpenCode's idle location eviction) detaches; live windows keep warming.
     return async () => {
       disposed = true
       events.abort()
       controls.dispose()
-      engine.dispose()
       ordinary.dispose()
+      resident.publishers.delete(publish)
       registry.dispose()
-      await within(async () => { await journal?.dispose() }, 2000, "metadata-timeout").catch((error: unknown) => {
-        log({ event: "ui-status-failed", reason: "cleanup-failed", ...errorDetails(error) })
-      })
-      preparations.clear(); recoveries.clear(); inflight.clear(); roots.clear(); models.clear()
+      preparations.clear(); inflight.clear()
+      if (await detach(key, resident) === "parked") log({ event: "parked", reason: "location-disposed" })
     }
   },
 } satisfies Plugin.Plugin

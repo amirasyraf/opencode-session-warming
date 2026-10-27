@@ -651,3 +651,49 @@ test("stopped preferences are bounded without silently re-enabling older session
   assert.equal(h.engine.stop("excess"), "stopped")
   h.engine.dispose()
 })
+
+test("a late wakeup within the selected TTL sends one warm; past the TTL it is a clock gap", async () => {
+  for (const [wake, resumed] of [[1_700_000, true], [1_900_000, false]] as const) {
+    const h = harness(undefined, { intervalMs: undefined, durationMs: 10_800_000 })
+    const token = h.engine.prepare("parent", true, { providerID: "openai", modelID: "gpt-5.6-sol" })!
+    const [url, init] = ordinary()
+    init.body = JSON.stringify({ ...JSON.parse(init.body as string), model: "gpt-5.6-sol" })
+    finish(h.captures.get(token)!(url, init)!, true)
+    assert.equal(h.statuses.at(-1)?.ttlMs, 1_800_000)
+    h.clock.time = wake // Sleep past the 28-minute refresh target.
+    const timers = [...h.clock.timers.values()]
+    h.clock.timers.clear()
+    for (const timer of timers) timer.callback()
+    await setImmediate()
+    await setImmediate()
+    assert.equal(h.requests.length, resumed ? 1 : 0, String(wake))
+    assert.equal(h.engine.has("parent"), resumed, String(wake))
+    assert.equal(h.logs.some((log) => log.reason === "resume-within-ttl"), resumed, String(wake))
+    if (resumed) {
+      assert.equal(h.logs.filter((log) => log.event === "warm-completed").length, 1, "no catch-up burst")
+      assert.equal(h.statuses.at(-1)?.nextAttemptAt, wake + 1_680_000, "the next target counts from the resumed warm")
+    } else assert.equal(h.statuses.at(-1)?.reason, "clock-gap")
+    h.engine.dispose()
+  }
+})
+
+test("republish re-announces live windows; onEmpty fires after the last window ends, not on disposal", async () => {
+  const h = harness(undefined, { durationMs: 60000 })
+  let empty = 0
+  h.engine.onEmpty = () => { empty++ }
+  h.start()(true)
+  h.start("other")(true)
+  assert.equal(h.engine.size, 2)
+  h.engine.stop("other")
+  h.statuses.length = 0
+  h.engine.republish()
+  assert.deepEqual(h.statuses.map((status) => [status.sessionID, status.phase, status.manualStopped]).sort(),
+    [["other", "stopped", true], ["parent", "waiting", false]])
+  h.engine.invalidate("parent", "reverted")
+  assert.equal(empty, 0)
+  h.engine.invalidate("other", "reverted")
+  assert.equal(empty, 1)
+  h.start()(true)
+  h.engine.dispose()
+  assert.equal(empty, 1)
+})

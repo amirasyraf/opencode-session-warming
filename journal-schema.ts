@@ -58,7 +58,7 @@ const reasons = ["unclassified", "configured-off", "unsupported-transport", "ord
   "pressure", "policy-unavailable", "unknown-option", "invalid-enabled", "invalid-debug", "invalid-duration", "invalid-interval",
   "interval-not-less-than-duration", "invalid-overrides", "invalid-journal", "invalid-journal-enabled", "invalid-journal-retention",
   "invalid-journal-max-bytes", "unsupported-content-encoding", "unsupported-input-compaction", "websocket-transport",
-  "native-warming", "publish-failed", "unsupported-opencode-version"]
+  "native-warming", "publish-failed", "unsupported-opencode-version", "resume-within-ttl"]
 const enums: Record<string, readonly string[]> = {
   reason: reasons,
   adapterID: ["codex", "openai-api", "github-copilot"], strategy: ["keepalive", "native-prewarm", "bounded-replay"],

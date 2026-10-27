@@ -52,6 +52,10 @@ type State = {
   failed: number
   usage?: UsageStats
   marks: Mark[]
+  /** Last published phase, so a newly attached status observer sees the same state. */
+  shown?: { phase: Phase; reason?: string }
+  /** Start of the last request assumed to refresh the provider cache (ordinary capture or successful warm). */
+  freshAt?: number
 }
 
 const usageFields = ["inputTokens", "uncachedInputTokens", "cachedTokens", "outputTokens", "cacheWriteTokens", "cacheWrite5mTokens", "cacheWrite1hTokens"] as const
@@ -82,6 +86,8 @@ export class WarmingEngine {
   private log: (diagnostic: Diagnostic) => void
   private clock: Clock
   private observer?: (status: WarmStatus) => void
+  /** Called after the last live window ends (not on disposal); lets a parked engine release itself. */
+  onEmpty?: () => void
   constructor(
     config: Settings,
     http: Transport,
@@ -94,6 +100,14 @@ export class WarmingEngine {
     this.log = log
     this.clock = clock
     this.observer = observer
+  }
+
+  /** Live windows, including manually stopped ones that still retain a snapshot. */
+  get size() { return this.states.size }
+
+  /** Re-announce live windows to a newly attached status observer. Never changes warming. */
+  republish() {
+    for (const [id, state] of this.states) if (state.shown) this.notify(id, state, state.shown.phase, state.shown.reason)
   }
 
   has(sessionID: string) {
@@ -180,7 +194,7 @@ export class WarmingEngine {
     state.durationMs += durationMs
     state.expiresAt = state.expiresAt! + durationMs
     this.schedule(sessionID, state)
-    this.notify(sessionID, state, state.active ? "generating" : state.warm ? "sending" : state.snapshot ? "waiting" : "preparing")
+    this.notify(sessionID, state, this.phase(state))
     this.emit({ event: "warming-extended", sessionID, reason: "user-extend", windowID: state.windowID,
       ...state.metadata, providerID: state.context.providerID, model: state.context.modelID,
       durationMs, expiresAt: state.expiresAt })
@@ -237,6 +251,9 @@ export class WarmingEngine {
     this.emit({ event: "stopped", sessionID, reason, windowID: state.windowID, ...state.metadata,
       providerID: state.context.providerID, model: state.context.modelID })
     this.notify(sessionID, state, reason === "expired" ? "expired" : "stopped", reason)
+    if (!this.disposed && this.states.size === 0) {
+      try { this.onEmpty?.() } catch (error) { this.emit({ event: "internal-error", reason: "cleanup-failed", ...errorDetails(error) }) }
+    }
   }
 
   dispose() {
@@ -267,8 +284,13 @@ export class WarmingEngine {
       expiresAt: 0, durationMs: this.config.durationMs, completed: 0, failed: 0, marks: [] }, reason === "awaiting-activity" ? "idle" : "stopped", reason)
   }
 
+  private phase(state: State): Phase {
+    return state.active ? "generating" : state.warm ? "sending" : state.snapshot ? "waiting" : "preparing"
+  }
+
   private notify(sessionID: string, state: State, phase: Phase, reason?: string) {
     if (phase !== "stopped" && phase !== "expired" && phase !== "idle" && !this.current(sessionID, state)) return
+    if (this.states.get(sessionID) === state) state.shown = { phase, reason }
     const stoppedAt = this.stopped.get(sessionID)
     if (stoppedAt !== undefined) { phase = "stopped"; reason = "user-stop" }
     try {
@@ -328,6 +350,7 @@ export class WarmingEngine {
     state.marks = []
     state.durationMs = this.config.durationMs
     state.expiresAt = now + state.durationMs
+    state.freshAt = now
     const result = capture(state.context, url, init)
     if (!result.replay) {
       this.emit({ event: "skipped", sessionID, windowID: state.windowID, ...state.metadata,
@@ -385,13 +408,28 @@ export class WarmingEngine {
       if (!this.current(sessionID, state)) return
       const current = this.clock.now()
       if (current >= expires) { this.invalidate(sessionID, "expired"); return }
-      if (current - deadline > CLOCK_GAP_TOLERANCE_MS) { this.invalidate(sessionID, "clock-gap"); return }
+      if (current - deadline > CLOCK_GAP_TOLERANCE_MS) {
+        if (!this.resumable(state, current)) { this.invalidate(sessionID, "clock-gap"); return }
+        // Woken within the assumed TTL: at most one immediate warm, never a catch-up burst.
+        state.wakeAt = current
+        this.emit({ event: "scheduled", sessionID, windowID: state.windowID, ...state.metadata, providerID: state.context.providerID,
+          model: state.context.modelID, nextAttemptAt: current, retryable: true, reason: "resume-within-ttl" })
+      }
       if (state.warm || this.stopped.has(sessionID)) { this.schedule(sessionID, state); return }
       void this.warm(sessionID, state).catch((error: unknown) => {
         this.emit({ event: "internal-error", sessionID, ...errorDetails(error) })
         if (this.current(sessionID, state)) this.invalidate(sessionID, "internal-error")
       })
     }, Math.max(0, deadline - now))
+  }
+
+  /**
+   * A late scheduler wakeup (sleep/resume) keeps a waiting snapshot only while the selected TTL, counted from the last
+   * request start assumed to refresh the cache, has not elapsed. In-flight work and unknown TTLs stay strict.
+   */
+  private resumable(state: State, now: number) {
+    return !state.warm && !state.active && state.snapshot !== undefined && state.policy.ttlMs !== undefined &&
+      state.freshAt !== undefined && now - state.freshAt < state.policy.ttlMs
   }
 
   private async warm(sessionID: string, state: State) {
@@ -457,6 +495,7 @@ export class WarmingEngine {
         const usage = await state.snapshot.drain(response, controller.signal)
         if (!currentWarm() || !this.clockCurrent(sessionID, state)) return
         succeeded = true
+        state.freshAt = startedAt
         state.usage = addUsage(state.usage, usage)
         delay = Math.max(Math.min(state.policy.intervalMs, 1000), startedAt + state.policy.intervalMs - this.clock.now())
         mark.result = "completed"
