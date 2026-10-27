@@ -1,0 +1,84 @@
+name: Compatibility
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Optional exact stable V2 version (blank runs the release matrix)'
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compatibility-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: Unit and type contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db # v3
+      - run: npm ci
+      - run: npm run check && actionlint .github/workflows/compatibility.yml
+
+  releases:
+    name: Discover stable V2 releases
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.discover.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db # v3
+      - id: discover
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          matrix=$(node scripts/compatibility.ts matrix "$REQUESTED_VERSION")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo '### Selected OpenCode releases' >> "$GITHUB_STEP_SUMMARY"
+          echo "$matrix" >> "$GITHUB_STEP_SUMMARY"
+
+  host:
+    name: OpenCode ${{ matrix.release.version }}${{ matrix.release.candidate && ' (candidate)' || '' }} / ${{ matrix.os }}
+    needs: releases
+    strategy:
+      fail-fast: false
+      matrix:
+        release: ${{ fromJSON(needs.releases.outputs.matrix).include }}
+        os: [ubuntu-24.04, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db # v3
+      - run: npm ci
+      - name: Runtime and terminal UI contracts (local mock only)
+        env:
+          OPENCODE_VERSION: ${{ matrix.release.version }}
+        run: npm run test:compatibility -- "$OPENCODE_VERSION" 2>&1 | tee compatibility.log
+      - name: Retain contract-test output
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: compatibility-${{ matrix.release.version }}-${{ matrix.os }}
+          path: compatibility.log
+          retention-days: 14
+          if-no-files-found: ignore

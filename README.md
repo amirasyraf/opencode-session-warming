@@ -1,9 +1,11 @@
 # OpenCode session warming
 
+[![Compatibility](https://github.com/amirasyraf/opencode-session-warming/actions/workflows/compatibility.yml/badge.svg?branch=main)](https://github.com/amirasyraf/opencode-session-warming/actions/workflows/compatibility.yml)
+
 An OpenCode V2 (2.1.x and 2.2.x) plugin that keeps supported root-session prompt
 prefixes warm while OpenCode is waiting on a foreground subagent or
 long-running tool. It also adds a warming indicator and session controls to the
-terminal UI. This branch targets V2 only; OpenCode 1.18.x is no longer
+terminal UI. The main branch targets V2 only; OpenCode 1.18.x is no longer
 supported.
 
 It replays the session's real captured provider request. It does not use, and
@@ -81,6 +83,28 @@ The committed `opencode.jsonc.example` and `cli.json.example` files are the
 configuration templates. Compare them after pulling changes; if either file
 changes, review the corresponding local OpenCode config. Do not overwrite your
 local config because it may contain other plugins.
+
+## OpenCode upgrades
+
+Stable patches within 2.1.x and 2.2.x are allowed automatically. SDK dependency
+pins are development baselines, not pins on your installed OpenCode.
+
+The [Compatibility workflow](https://github.com/amirasyraf/opencode-session-warming/actions/workflows/compatibility.yml)
+runs on pushes, pull requests, and daily. It checks unit/types plus real server
+and terminal UI contracts on Linux and macOS against 2.1.0, the newest patch of
+each supported minor, and the newest stable V2 release. Results and test logs
+are available in Actions; the badge above shows the latest main-branch result.
+
+A new minor is probed in a disposable copy without enabling it in your installed
+plugin. After its contracts pass, admitting it should be a small support-range,
+test, and documentation update, not a manual source audit. Investigate upstream
+implementation only when a contract fails. Major versions and prereleases need
+explicit review.
+
+For a targeted check, use **Run workflow** with an exact version, or run
+`npm run test:compatibility -- 2.2.0` locally. The command downloads a private
+binary, runs both integration suites in parallel against local mocks, then
+cleans up. It never changes your OpenCode installation or credentials.
 
 ## Configuration
 
@@ -336,12 +360,16 @@ npm ci
 npm run check
 OPENCODE_BIN=/path/to/private/opencode-2.2.0 npm run test:runtime
 OPENCODE_BIN=/path/to/private/opencode-2.2.0 npm run test:tui
+# Or download and test one version automatically:
+npm run test:compatibility -- 2.2.0
 ```
 
 The unit suite uses fake clocks and mock transports. Runtime and TUI tests need
-an explicitly supplied 2.1.x or 2.2.x binary; run both suites on each supported
-baseline (2.1.0 and 2.2.0) when changing compatibility. Development types stay
-pinned to 2.1.0 to preserve the older API baseline. They run a private `opencode serve` with
+an explicitly supplied 2.1.x or 2.2.x binary (or use the compatibility command
+above). CI owns the multi-version matrix; ordinary local edits need
+`npm run check`, with a targeted host check when changing host-facing behavior.
+Development types stay pinned to 2.1.0 to preserve the older API baseline.
+The integration suites run a private `opencode serve` with
 isolated HOME, XDG, `OPENCODE_CONFIG_DIR`, and `OPENCODE_DB`, a fake isolated
 ChatGPT credential, and a local mock provider behind a fixture plugin and a dead
 proxy. No automated test calls a live model provider or touches the shared

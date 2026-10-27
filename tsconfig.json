@@ -15,5 +15,5 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true
   },
-  "include": ["*.ts", "*.tsx", "tests/**/*.ts"]
+  "include": ["*.ts", "*.tsx", "tests/**/*.ts", "scripts/**/*.ts"]
 }

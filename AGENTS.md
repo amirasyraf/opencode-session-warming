@@ -2,7 +2,8 @@
 
 ## Read first
 
-This repository is one OpenCode V2 (stable 2.1.x and 2.2.x) local plugin directory:
+The main branch is one OpenCode V2 (stable 2.1.x and 2.2.x) local plugin directory;
+V1 support is retired. Do not maintain a separate V1 compatibility path:
 
 - `server.ts` is the server plugin (`{ id: "session-warming", setup }`, Promise API).
 - `tui.tsx` is the CLI plugin (`{ id: "session-warming.tui", setup }`).
@@ -282,10 +283,31 @@ and a PTY; it may submit locally consumed warming commands, but must not submit
 model prompts or contact a live provider. Control fixtures must verify
 unchanged conversation history and acknowledged start/stop behavior.
 
-Keep development SDK/theme types pinned to the 2.1.0 API baseline. Compatibility
-changes must verify both runtime and TUI suites against private 2.1.0 and 2.2.0
-binaries. Admit stable 2.1.x and 2.2.x patches, not future minors or prereleases;
-the shared `compatibility.ts` guard controls both server and TUI loading.
+Keep development SDK/theme types pinned to the 2.1.0 API baseline, independently
+of runtime support. Admit stable patches within supported minors automatically;
+the shared `compatibility.ts` guard controls server and TUI loading. New minors
+require passing host contract tests and a small range/test/documentation update;
+major versions and prereleases require explicit review. Do not repeat upstream
+source archaeology unless a concrete contract test fails.
+
+`.github/workflows/compatibility.yml` owns the full multi-version, Linux/macOS
+matrix on push/PR and daily. It discovers exact published stable V2 versions
+from npm (not GitHub's latest release, which may belong to V1), selects 2.1.0,
+the latest patch of each supported minor, and the newest V2 candidate, with
+duplicates removed. CI uses read-only permissions and never changes the support
+range automatically. Results and mock-only logs are retained in Actions.
+
+For local implementation run `npm run check` once after the full edit batch;
+run `npm run test:compatibility -- <version>` only for a targeted host-facing
+change or a reported contract failure. Do not mandate a repeated local matrix:
+use CI evidence for the remaining versions. The compatibility runner packs a
+private platform binary into a temporary directory, verifies its exact version,
+and runs runtime/TUI tests concurrently. `OPENCODE_BIN` may reuse an explicitly
+supplied private binary. Unadmitted stable V2 candidates are exercised only in
+a disposable source copy whose guard admits that exact candidate; never add a
+production environment-variable bypass or alter the installed plugin's guard.
+Test our contracts (request/encoding preservation, isolation, root eligibility,
+controls, events, and UI loading), not incidental host implementation choices.
 
 When behavior, configuration, support, privacy, or workflow contracts change,
 update both documentation files: explain the user-facing result in `README.md`

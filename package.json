@@ -10,6 +10,8 @@
     "test": "node --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm test",
+    "compatibility:matrix": "node scripts/compatibility.ts matrix",
+    "test:compatibility": "node scripts/compatibility.ts run",
     "journal": "node journal-cli.ts",
     "test:runtime": "node --test tests/runtime.integration.ts",
     "test:tui": "node --test tests/tui.integration.ts"
