@@ -9,7 +9,7 @@ import { spawn, spawnSync } from "node:child_process"
 import { setTimeout as sleep } from "node:timers/promises"
 import { zstdDecompressSync } from "node:zlib"
 import { KEEPALIVE } from "../protocol.ts"
-import { isSupportedOpenCodeVersion } from "../compatibility.ts"
+import { isSupportedOpenCodeVersion, SUPPORTED_OPENCODE_VERSION_RANGE } from "../compatibility.ts"
 
 /** Shared, fully isolated OpenCode V2 server harness for runtime and TUI integration tests. */
 export const project = resolve(fileURLToPath(new URL("..", import.meta.url)))
@@ -70,9 +70,10 @@ export type MockRequest = { session: string; warm: boolean; auth: boolean; encod
 export const PASSWORD = "integration-password"
 
 export async function startServer(signal: AbortSignal, options: { plugin?: Record<string, unknown>; cli?: unknown; childDelayMs?: number } = {}) {
-  assert.ok(binary, "set OPENCODE_BIN to a private OpenCode V2 2.1.x binary")
+  assert.ok(binary, `set OPENCODE_BIN to a private OpenCode V2 ${SUPPORTED_OPENCODE_VERSION_RANGE} binary`)
   const version = spawnSync(binary, ["--version"], { encoding: "utf8" })
-  assert.equal(isSupportedOpenCodeVersion(version.stdout.trim().replace(/^opencode v/, "")), true, `integration requires 2.1.x: ${version.stdout}`)
+  assert.equal(isSupportedOpenCodeVersion(version.stdout.trim().replace(/^opencode v/, "")), true,
+    `integration requires ${SUPPORTED_OPENCODE_VERSION_RANGE}: ${version.stdout}`)
   const home = await mkdtemp(join(tmpdir(), "opencode-warming-v2-"))
   const requests: MockRequest[] = []
   const parents = new Set<string>()

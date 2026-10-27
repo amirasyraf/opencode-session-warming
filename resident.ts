@@ -1,8 +1,8 @@
 /**
  * Process-scoped warming residents, one per OpenCode location.
  *
- * OpenCode V2 invalidates a location's service graph, including every plugin scope, after 60 minutes without
- * durable session events, and reloads it on the next request for that location. Warm replays are independent
+ * OpenCode V2 can evict an idle location's service graph, including every plugin scope (60 minutes by default;
+ * configurable in 2.2.0), and reloads it on the next request for that location. Warm replays are independent
  * HTTP calls that need only RAM state, timers, and `fetch`, never the location's services. A plugin scope therefore
  * attaches to its location's resident instead of owning the warming engine: the last scope to detach parks a
  * resident that still has live windows, and the next scope for the same location and options re-attaches to it.

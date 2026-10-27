@@ -16,7 +16,8 @@ test("OpenCode V2 warms a blocked root over HTTP, keeps history clean, and honou
     const warm = warms(id)[0]
     const ordinary = requests.filter((request) => request.session === id && !request.warm && request.at <= warm.at).at(-1)!
     assert.deepEqual(warm.input.slice(0, -1), ordinary.input, "replay keeps the complete captured input as its prefix")
-    assert.equal(warm.encoding, "zstd", "ChatGPT replays keep the ordinary zstd body encoding")
+    assert.equal(warm.encoding, ordinary.encoding, "ChatGPT replays preserve the ordinary body encoding")
+    assert.ok(ordinary.encoding === undefined || ordinary.encoding === "zstd", "ordinary requests use plain JSON or zstd")
     assert.ok(requests.some((request) => request.session !== id && !request.warm), "child requests reached the mock")
     assert.ok(requests.filter((request) => request.session !== id).every((request) => !request.warm), "children never warm")
     assert.ok(requests.every((request) => request.auth), "every request used the isolated credential")

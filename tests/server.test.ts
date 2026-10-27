@@ -258,9 +258,18 @@ test("native warming configuration suspends every window until it is removed", a
   await h.cleanup?.()
 })
 
+test("OpenCode 2.2.0 registers hooks, captures requests, and serves controls", async () => {
+  const h = await harness({}, { name: "opencode", version: "2.2.0", channel: "latest" })
+  assert.ok(h.hooks.some((hook) => hook.name === "http.request"))
+  await h.ordinary("root")
+  assert.equal((await h.rpc("status", { sessionID: "root" })).status.model, "gpt-test")
+  assert.equal((await h.rpc("control", { requestID: "v220-stop", sessionID: "root", action: "stop" })).result, "stopped")
+  await h.cleanup?.()
+})
+
 test("unsupported versions and invalid options register nothing", async () => {
   for (const [options, app] of [[{}, { name: "opencode", version: "1.18.30", channel: "latest" }],
-    [{}, { name: "opencode", version: "2.2.0", channel: "latest" }], [{ bogus: true }, undefined]] as const) {
+    [{}, { name: "opencode", version: "2.3.0", channel: "latest" }], [{ bogus: true }, undefined]] as const) {
     const h = await harness(options, app)
     assert.equal(h.hooks.length, 0)
     assert.equal(h.cleanup, undefined)

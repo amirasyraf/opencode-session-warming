@@ -1,6 +1,6 @@
 # OpenCode session warming
 
-An OpenCode V2 (2.1.x) plugin that keeps supported root-session prompt
+An OpenCode V2 (2.1.x and 2.2.x) plugin that keeps supported root-session prompt
 prefixes warm while OpenCode is waiting on a foreground subagent or
 long-running tool. It also adds a warming indicator and session controls to the
 terminal UI. This branch targets V2 only; OpenCode 1.18.x is no longer
@@ -16,7 +16,7 @@ the computer must stay awake and connected.
 
 ## Supported setup
 
-- OpenCode 2.1.x stable releases
+- OpenCode 2.1.x and 2.2.x stable releases; other versions remain disabled until verified
 - OpenAI ChatGPT/Codex OAuth over the built-in `openai` provider, with the
   provider transport set to HTTP (see below)
 - OpenAI API GPT-5.6+ Responses at `api.openai.com/v1/responses`
@@ -169,8 +169,9 @@ not claim a cache hit or a cost saving after a request completes.
    long sleep/resume gaps, and incompatible responses stop the snapshot.
    A retried root-model request can establish a fresh window after expiry.
 
-OpenCode unloads an idle project, with its plugins, after 60 minutes without
-chat activity. Warming does not count as activity, but a live window keeps
+OpenCode unloads idle projects and their plugins after 60 minutes by default
+(configurable in 2.2.0, which also keeps active sessions and background jobs loaded).
+Warming does not count as activity, but a live window keeps
 warming in the background and the plugin picks it up again when the project
 reloads, so a multi-hour window lasts its full duration. Restarting OpenCode,
 changing the plugin's options, or editing the plugin code still ends it. If you
@@ -333,12 +334,14 @@ details.
 mise install
 npm ci
 npm run check
-OPENCODE_BIN=/path/to/private/opencode-2.1.x npm run test:runtime
-OPENCODE_BIN=/path/to/private/opencode-2.1.x npm run test:tui
+OPENCODE_BIN=/path/to/private/opencode-2.2.0 npm run test:runtime
+OPENCODE_BIN=/path/to/private/opencode-2.2.0 npm run test:tui
 ```
 
 The unit suite uses fake clocks and mock transports. Runtime and TUI tests need
-an explicitly supplied 2.1.x binary. They run a private `opencode serve` with
+an explicitly supplied 2.1.x or 2.2.x binary; run both suites on each supported
+baseline (2.1.0 and 2.2.0) when changing compatibility. Development types stay
+pinned to 2.1.0 to preserve the older API baseline. They run a private `opencode serve` with
 isolated HOME, XDG, `OPENCODE_CONFIG_DIR`, and `OPENCODE_DB`, a fake isolated
 ChatGPT credential, and a local mock provider behind a fixture plugin and a dead
 proxy. No automated test calls a live model provider or touches the shared

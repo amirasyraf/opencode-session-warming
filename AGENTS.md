@@ -2,7 +2,7 @@
 
 ## Read first
 
-This repository is one OpenCode V2 (2.1.x only) local plugin directory:
+This repository is one OpenCode V2 (stable 2.1.x and 2.2.x) local plugin directory:
 
 - `server.ts` is the server plugin (`{ id: "session-warming", setup }`, Promise API).
 - `tui.tsx` is the CLI plugin (`{ id: "session-warming.tui", setup }`).
@@ -63,8 +63,10 @@ store, background daemon, task counter, or conversation reconstruction layer.
 ## Location lifetime invariants
 
 - OpenCode 2.1.x invalidates a location's service graph (and every plugin scope)
-  after a fixed, unconfigurable 60 minutes without durable `SessionEvent`s
-  (`packages/core/src/location-activity.ts`) and reloads it on the next request,
+  after a fixed 60 minutes without durable `SessionEvent`s. In 2.2.0 the default
+  remains 60 minutes, `experimental.location_idle_timeout` can override/disable
+  eviction, and active executions/background jobs prevent eviction
+  (`packages/core/src/location-activity.ts`). It reloads on the next request,
   such as the CLI's two-second status poll. Warming, plugin RPC, and status
   polling are not durable activity. Never fabricate session activity to keep a
   location alive.
@@ -268,8 +270,8 @@ of `git status`, `git diff`, and the staged diff.
 
 The unit suite uses fake clocks, mock transports, and a fake V2 plugin context.
 Do not add live provider calls to automated tests. `npm run test:runtime` and
-`npm run test:tui` require `OPENCODE_BIN` pointing at a private 2.1.x binary
-(for example from `npm pack @opencode/cli-darwin-arm64@2.1.0` into a temp
+`npm run test:tui` require `OPENCODE_BIN` pointing at a private 2.1.x or 2.2.x binary
+(for example from `npm pack @opencode/cli-darwin-arm64@2.2.0` into a temp
 directory); never install it globally or into `~/.opencode`. They run a private
 `opencode serve` with isolated HOME/XDG, `OPENCODE_CONFIG_DIR`, `OPENCODE_DB`,
 a fake ChatGPT credential created through the isolated API, and a local mock
@@ -279,6 +281,11 @@ service, or global OpenCode configuration. `npm run test:tui` requires Python 3
 and a PTY; it may submit locally consumed warming commands, but must not submit
 model prompts or contact a live provider. Control fixtures must verify
 unchanged conversation history and acknowledged start/stop behavior.
+
+Keep development SDK/theme types pinned to the 2.1.0 API baseline. Compatibility
+changes must verify both runtime and TUI suites against private 2.1.0 and 2.2.0
+binaries. Admit stable 2.1.x and 2.2.x patches, not future minors or prereleases;
+the shared `compatibility.ts` guard controls both server and TUI loading.
 
 When behavior, configuration, support, privacy, or workflow contracts change,
 update both documentation files: explain the user-facing result in `README.md`
