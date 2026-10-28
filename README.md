@@ -23,7 +23,7 @@ the computer must stay awake and connected.
   provider transport set to HTTP (see below)
 - OpenAI API GPT-5.6+ Responses at `api.openai.com/v1/responses`
 - GitHub Copilot GPT-5.6+ Responses (unit-tested only on V2)
-- GitHub Copilot Claude Sonnet/Opus 5+ Messages with adaptive or disabled thinking
+- GitHub Copilot Claude Sonnet/Opus 5+ and Haiku 5.5+ Messages with adaptive or disabled thinking
   (unit-tested only on V2)
 - Text, ordinary function tools, and the complete provider input chain, including file attachments and embedded base64 PNG/JPEG/WebP/GIF images
 - Root sessions only
@@ -158,7 +158,8 @@ Example provider overrides:
       "models": {
         "gpt-5.6-luna": { "intervalMs": 1680000 },
         "claude-sonnet-5": { "intervalMs": 240000 },
-        "claude-opus-5": { "intervalMs": 240000 }
+        "claude-opus-5": { "intervalMs": 240000 },
+        "claude-haiku-5.5": { "intervalMs": 240000 }
       }
     }
   }
@@ -171,8 +172,8 @@ Example provider overrides:
 | --- | --- | --- |
 | OpenAI API GPT-5.6+ | 28 minutes | OpenAI documents a 30-minute minimum. |
 | Codex OAuth and Copilot GPT-5.6+ (including GPT-6.x) | 28 minutes | Upstream behavior is assumed. |
-| Copilot Sonnet/Opus 5+ | 4 minutes | Default or mixed cache markers. |
-| Copilot Sonnet/Opus 5+ with only `1h` markers | 58 minutes | Requested one-hour marker. |
+| Copilot Sonnet/Opus 5+ and Haiku 5.5+ | 4 minutes | Default or mixed cache markers. |
+| Copilot Sonnet/Opus 5+ and Haiku 5.5+ with only `1h` markers | 58 minutes | Requested one-hour marker. |
 | Older supported Codex models | 4 minutes | Retention is unknown. |
 
 These are scheduling policies, not cache-expiry measurements. The plugin does

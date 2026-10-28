@@ -26,7 +26,7 @@ here instead of expanding the README.
 
 The plugin warms root-session OpenAI API/Codex OAuth and GitHub Copilot HTTP
 requests. Supported paths are API/Copilot GPT-5.6+ (including GPT-6.x)
-Responses, Copilot Sonnet / Opus 5+ Messages, and legacy Codex. Other
+Responses, Copilot Sonnet / Opus 5+ and Haiku 5.5+ Messages, and legacy Codex. Other
 providers, Chat Completions, enterprise/custom endpoints, WebSockets,
 provider-hosted tools, and stateful provider conversations are unsupported. Do
 not silently enable or force a transport, and never change user credentials or
@@ -34,6 +34,11 @@ provider settings: OpenAI warming requires the user's own
 `providers.openai.settings.transport: "http"`; WebSocket use is only observed
 (`experimental.ws.handshake`, no mutation) and reported as
 `websocket-transport`.
+
+Claude eligibility uses numeric family floors: Sonnet/Opus 5+ and Haiku 5.5+,
+including dotted and dashed minor versions. Older Haiku stays unsupported;
+eligible Haiku uses the same bounded Messages replay and cache-marker policy
+as Sonnet/Opus without relaxing request validation.
 
 Never depend on, enable, or run alongside OpenCode's native warming
 (`opencode.warming`, config key `warming`). Never call `session.generate`. The

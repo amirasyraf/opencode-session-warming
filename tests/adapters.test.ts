@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { capture, supportsModel } from "../adapters.ts"
-import { GPT_INTERVAL_MS, modernClaude, modernGPT, resolvePolicy, settings } from "../cache-policy.ts"
+import { GPT_INTERVAL_MS, initialProfile, modernClaude, modernGPT, resolvePolicy, settings } from "../cache-policy.ts"
 import { CODEX_ENDPOINT } from "../protocol.ts"
 import { imageURL, requestBody } from "./helpers.ts"
 
@@ -9,7 +9,7 @@ const signal = () => new AbortController().signal
 const init = (body: unknown): RequestInit => ({ method: "POST", headers: { authorization: "Bearer fixture-only",
   "content-type": "application/json", "x-initiator": "user", "x-github-api-version": "2026-06-01", "idempotency-key": "original" }, body: JSON.stringify(body) })
 const context = (providerID = "github-copilot", modelID = "gpt-5.6-sol") => ({ providerID, modelID })
-const claude = () => ({ model: "claude-sonnet-5", stream: true, max_tokens: 8192,
+const claude = (model = "claude-sonnet-5") => ({ model, stream: true, max_tokens: 8192,
   system: [{ type: "text", text: "Stable instructions", cache_control: { type: "ephemeral", ttl: "1h" } }],
   tools: [{ name: "read", description: "Read a file", input_schema: { type: "object", properties: {} } }],
   tool_choice: { type: "auto" }, thinking: { type: "adaptive", display: "summarized" }, output_config: { effort: "high" },
@@ -25,8 +25,10 @@ const claude = () => ({ model: "claude-sonnet-5", stream: true, max_tokens: 8192
 test("numeric model floors admit GPT/Claude target families without substring matches", () => {
   for (const id of ["gpt-5.6", "gpt-5.6-sol", "gpt-5.10", "gpt-6", "gpt-6.1-sol", "gpt-5.6-2026-07-01"]) assert.ok(modernGPT(id), id)
   for (const id of ["gpt-5.5", "gpt-5-mini", "fake-gpt-6", "gpt-5o", "gpt-5.6/other"]) assert.equal(modernGPT(id), false, id)
-  for (const id of ["claude-sonnet-5", "claude-opus-5.5", "claude-opus-5-5", "claude-sonnet-6", "claude-sonnet-5-20260701"]) assert.ok(modernClaude(id), id)
-  for (const id of ["claude-haiku-5", "claude-opus-4.8", "fake-claude-sonnet-5"]) assert.equal(modernClaude(id), false, id)
+  for (const id of ["claude-sonnet-5", "claude-opus-5.5", "claude-opus-5-5", "claude-sonnet-6", "claude-sonnet-5-20260701",
+    "claude-haiku-5.5", "claude-haiku-5-5", "claude-haiku-5.10", "claude-haiku-6", "claude-haiku-5-5-20261001"]) assert.ok(modernClaude(id), id)
+  for (const id of ["claude-haiku-4.5", "claude-haiku-5", "claude-haiku-5.4", "claude-haiku-5-4", "claude-haiku-5-20261001",
+    "claude-opus-4.8", "fake-claude-sonnet-5", "fake-claude-haiku-5.5", "claude-haiku-5.5/other"]) assert.equal(modernClaude(id), false, id)
   assert.equal(supportsModel(context("other")), false)
   assert.equal(supportsModel(context("github-copilot", "claude-opus-4.8")), false)
 })
@@ -82,8 +84,10 @@ test("Codex retains the legacy strategy but newer models resolve a 28-minute int
   assert.equal(capture(context("openai", "gpt-5.5"), "https://api.openai.com/v1/responses", init({ ...requestBody, model: "gpt-5.5" })).reason, "unsupported-model")
 })
 
-test("Claude preserves images, signatures, tool selection, thinking and mixed TTLs", async () => {
-  const body = claude()
+for (const model of ["claude-sonnet-5", "claude-haiku-5.5", "claude-haiku-5-5"]) test(`${model} preserves images, signatures, tool selection, thinking and mixed TTLs`, async () => {
+  const body = claude(model)
+  assert.ok(supportsModel(context("github-copilot", model)))
+  assert.deepEqual(initialProfile(model), { intervalMs: 240000, ttlMs: 300000, ttlEvidence: "upstream-assumed" })
   const result = capture(context("github-copilot", body.model), "https://api.githubcopilot.com/v1/messages", init(body))
   assert.ok(result.replay)
   assert.deepEqual(JSON.parse(result.replay.request(signal()).body as string), { ...body, max_tokens: 128 })
@@ -115,8 +119,8 @@ test("Claude preserves images, signatures, tool selection, thinking and mixed TT
   assert.equal(oneHour.automatic.intervalMs, 3480000)
 })
 
-test("unsupported Claude shapes fail closed without leaking data", () => {
-  const body = claude()
+for (const model of ["claude-sonnet-5", "claude-haiku-5.5", "claude-haiku-5-5"]) test(`${model} unsupported shapes fail closed without leaking data`, () => {
+  const body = claude(model)
   for (const [change, reason] of [
     [{ thinking: { type: "enabled", budget_tokens: 2048 } }, "unsupported-thinking-budget"],
     [{ tools: [{ type: "web_search_20250305", name: "web_search" }] }, "unsupported-tools"],
@@ -130,6 +134,24 @@ test("unsupported Claude shapes fail closed without leaking data", () => {
     assert.equal(JSON.stringify(result).includes("secret"), false)
   }
   assert.equal(capture(context("github-copilot", "claude-opus-5"), "https://api.githubcopilot.com/v1/messages", init(body)).reason, "model-mismatch")
+})
+
+test("Haiku uses only Copilot Messages and preserves disabled thinking", () => {
+  const body = { ...claude("claude-haiku-5.5"), thinking: { type: "disabled" } }
+  for (const host of ["https://api.githubcopilot.com", "https://api.individual.githubcopilot.com", "https://api.business.githubcopilot.com"]) {
+    const result = capture(context("github-copilot", body.model), `${host}/v1/messages`, init(body))
+    assert.ok(result.replay, host)
+    assert.equal(result.replay.strategy, "bounded-replay")
+    assert.deepEqual(JSON.parse(result.replay.request(signal()).body as string), { ...body, max_tokens: 128 })
+    assert.equal(capture(context("github-copilot", body.model), `${host}/responses`, init(body)).reason, "unsupported-endpoint")
+  }
+  for (const model of ["claude-haiku-4.5", "claude-haiku-5", "claude-haiku-5.4"]) {
+    assert.equal(supportsModel(context("github-copilot", model)), false, model)
+    assert.equal(capture(context("github-copilot", model), "https://api.githubcopilot.com/v1/messages", init({ ...body, model })).reason, "unsupported-model", model)
+  }
+  assert.equal(supportsModel(context("anthropic", body.model)), false)
+  assert.equal(capture(context("openai", body.model), "https://api.openai.com/v1/responses", init(body)).reason, "unsupported-model")
+  assert.equal(capture(context("github-copilot", body.model), "https://api.enterprise.githubcopilot.com/v1/messages", init(body)).reason, "unsupported-endpoint")
 })
 
 test("policy overrides are exact, independently inherited, validated and copied", () => {

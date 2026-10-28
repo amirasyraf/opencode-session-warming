@@ -85,6 +85,7 @@ export function modernGPT(id: string): boolean {
 }
 
 export function modernClaude(id: string): boolean {
-  const version = /^claude-(?:sonnet|opus)-(\d+)(?:[.-](\d{1,2}))?(?:-[a-z0-9]+)*$/.exec(id)
-  return !!version && Number(version[1]) >= 5
+  const version = /^claude-(sonnet|opus|haiku)-(\d+)(?:[.-](\d{1,2}))?(?:-[a-z0-9]+)*$/.exec(id)
+  return !!version && (Number(version[2]) > 5 || (Number(version[2]) === 5 &&
+    (version[1] !== "haiku" || Number(version[3] ?? 0) >= 5)))
 }
