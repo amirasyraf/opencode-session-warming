@@ -161,6 +161,7 @@ function registerControls(context: Context, client: WarmingClient) {
     if (action && !disposed && currentRoot(context).id === root.id) await run(action, root)
   }
   context.keymap.layer(() => ({
+    mode: "global",
     commands: [
       {
         id: "session-warming.menu", title: "Session warming", description: "Show warming controls for this session", group: "Session",
