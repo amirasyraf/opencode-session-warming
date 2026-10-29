@@ -33,6 +33,8 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const raw = init?.body as Uint8Array | string
   const text = headers.get("content-encoding") === "zstd" ? zstdDecompressSync(raw as Uint8Array).toString("utf8") : String(raw)
   warms.push({ url: String(input), headers, body: JSON.parse(text) })
+  if (String(input).endsWith("/v1/messages")) return new Response(JSON.stringify({ type: "message", stop_reason: "max_tokens",
+    content: [], usage: { input_tokens: 100, cache_read_input_tokens: 90, output_tokens: 128 } }))
   return completedResponse()
 }) as typeof fetch
 
@@ -154,6 +156,37 @@ test("GPT-6.x catalog aliases resolve to their API model and remain eligible", a
   assert.equal(status.model, "gpt-6.1-sol")
   assert.equal(status.adapterID, "codex")
   await h.cleanup?.()
+})
+
+for (const id of ["claude-sonnet-5.5", "claude-opus-5.5", "claude-haiku-5.5"]) test(`${id} warms native system updates through the V2 hooks without changing ordinary traffic`, async () => {
+  const h = await harness()
+  const ref = { providerID: "github-copilot", id, variant: "high" }
+  const body = { model: id, stream: true, max_tokens: 8192, thinking: { type: "adaptive" }, messages: [
+    { role: "user", content: [{ type: "text", text: "Fixture question" }] },
+    { role: "system", content: [{ type: "text", text: "Fixture update", cache_control: { type: "ephemeral", ttl: "5m" } }] },
+    { role: "system", content: [], output_config: { effort: "high" } },
+  ] }
+  try {
+    await h.trigger("context", { sessionID: "root", agent: "build", model: ref, system: [], messages: [], options: {}, tools: {} })
+    const request = new Request("https://api.githubcopilot.com/v1/messages", { method: "POST", body: JSON.stringify(body),
+      headers: { authorization: "Bearer test-only", "content-type": "application/json", "session-id": "root" } })
+    const event = { sessionID: "root", agent: "build", model: ref, kind: "primary", request }
+    assert.equal((await h.trigger("http.request", event)).request, request)
+    assert.equal(request.bodyUsed, false)
+    assert.deepEqual(await request.clone().json(), body)
+    const response = new Response('data: {"type":"message_stop"}\n\n', { headers: { "content-type": "text/event-stream" } })
+    const observed = await h.trigger("http.response", { ...event, response })
+    assert.equal(await observed.response.text(), 'data: {"type":"message_stop"}\n\n')
+    await sleep(180)
+    assert.ok(h.warmsFor("root").length > 0)
+    assert.deepEqual(h.warmsFor("root")[0].body, { ...body, max_tokens: 128 })
+    const status = (await h.rpc("status", { sessionID: "root" })).status
+    assert.equal(status.model, id)
+    assert.equal(status.adapterID, "github-copilot")
+    assert.ok(status.completed > 0)
+    assert.equal(status.failed, 0)
+    assert.equal(status.reason, undefined)
+  } finally { await h.cleanup?.() }
 })
 
 test("session events: errors, compaction, revert and deletion invalidate; interruption keeps the snapshot", async () => {

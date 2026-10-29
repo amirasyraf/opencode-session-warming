@@ -159,6 +159,14 @@ store, background daemon, task counter, or conversation reconstruction layer.
 - Claude replay retains tool selection, thinking, effort, signatures, cache
   controls, and cache markers. Discard generated local function calls; never
   dispatch them.
+- Claude Messages admits inline `role: "system"` updates with text-block arrays
+  and optional `output_config: { effort: string }`, as emitted by OpenCode's
+  Anthropic serializer. Preserve their position, content, effort, and cache
+  markers verbatim; include their markers in TTL selection. Reject other
+  message-level fields, non-text system blocks, and malformed effort updates.
+- Changes to resident-owned engine/transport behavior (including request
+  validation and adapter eligibility) require a `RESIDENT_VERSION` bump, even
+  without a type change, so reload cannot re-adopt stale closures.
 - Skip incompatible explicit thinking budgets instead of changing them.
 - Keep Codex's legacy keepalive isolated: preserve the captured input as a
   prefix and append only its transient keepalive message. Do not invent a Codex

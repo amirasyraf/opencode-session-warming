@@ -246,6 +246,9 @@ Success feedback requires the server plugin's RPC response. If the result is not
   including file attachments and their placement. Warming controls may change
   the surrounding request envelope, but the input is not stripped or rebuilt.
 
+Copilot Claude replays also preserve mid-conversation system instructions and
+effort updates from OpenCode. These do not require a new conversation.
+
 Generated local function calls are discarded and never executed. Explicit
 thinking budgets that cannot fit the bounded replay are skipped rather than
 changed. Captured bodies and authenticated headers stay in memory only.

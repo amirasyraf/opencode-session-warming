@@ -160,6 +160,19 @@ export function classifyRequest(url: string, init: RequestInit, contract: { endp
     if (contract.protocol === "messages") {
       if (!Array.isArray(body.messages) || !body.messages.length) return { reason: "unsupported-input" }
       for (const message of body.messages) {
+        // OpenCode emits native in-band instruction and effort updates for modern Claude models.
+        // They are inline input, not provider-managed conversation state. Keep them in place on replay.
+        if (object(message) && message.role === "system") {
+          if (Object.keys(message).some((key) => !["role", "content", "output_config"].includes(key)) ||
+            !Array.isArray(message.content) || message.content.some((part) => !object(part) || part.type !== "text" || typeof part.text !== "string") ||
+            (message.output_config !== undefined && (!object(message.output_config) ||
+              typeof message.output_config.effort !== "string" || Object.keys(message.output_config).some((key) => key !== "effort")))) {
+            return { reason: "unsupported-input-message" }
+          }
+          const reason = messageContent(message.content, "system")
+          if (reason) return { reason }
+          continue
+        }
         if (!object(message) || !["user", "assistant"].includes(String(message.role)) ||
           Object.keys(message).some((key) => !["role", "content"].includes(key))) return { reason: "unsupported-input-message" }
         const reason = messageContent(message.content, message.role)

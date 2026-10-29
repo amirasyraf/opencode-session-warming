@@ -154,6 +154,55 @@ test("Haiku uses only Copilot Messages and preserves disabled thinking", () => {
   assert.equal(capture(context("github-copilot", body.model), "https://api.enterprise.githubcopilot.com/v1/messages", init(body)).reason, "unsupported-endpoint")
 })
 
+for (const model of ["claude-sonnet-5.5", "claude-opus-5.5", "claude-haiku-5.5"]) test(`${model} preserves native system and effort updates in the complete replay prefix`, () => {
+  // Wire forms from @opencode/ai's Anthropic Messages lowerNativeSystemUpdate / lowerMessages.
+  const body = { ...claude(model), messages: [
+    ...claude(model).messages,
+    { role: "system", content: [{ type: "text", text: "Updated instructions", cache_control: { type: "ephemeral", ttl: "5m" } }] },
+    { role: "system", content: [], output_config: { effort: "max" } },
+    { role: "assistant", content: [{ type: "text", text: "Continuing" }] },
+    { role: "user", content: [{ type: "text", text: "Continue" }] },
+    { role: "system", content: [{ type: "text", text: "Further instructions" }], output_config: { effort: "low" } },
+  ] }
+  const original = init(body)
+  const result = capture(context("github-copilot", model), "https://api.githubcopilot.com/v1/messages", original)
+  assert.ok(result.replay, result.reason ?? "native system updates are replayable")
+  assert.deepEqual(JSON.parse(result.replay.request(signal()).body as string), { ...body, max_tokens: 128 })
+  assert.equal(original.body, JSON.stringify(body))
+  assert.equal(result.replay.automatic.intervalMs, 240000)
+  // A marker on an in-band system update participates in TTL selection, not just body.system.
+  const onlySystemMarker = { ...body, messages: [
+    { role: "user", content: "Continue" },
+    { role: "system", content: [{ type: "text", text: "Updated instructions", cache_control: { type: "ephemeral", ttl: "5m" } }] },
+  ] }
+  assert.equal(capture(context("github-copilot", model), "https://api.githubcopilot.com/v1/messages", init(onlySystemMarker)).replay?.automatic.intervalMs, 240000)
+})
+
+test("native system updates reject unsupported content, fields, effort settings, and malformed cache markers", () => {
+  const body = claude("claude-opus-5.5")
+  for (const message of [
+    { role: "system", content: "not a native text-block array" },
+    { role: "system", content: null },
+    { role: "system", content: [null] },
+    { role: "system", content: [{ type: "text", text: 1 }] },
+    { role: "system", content: [{ type: "tool_use", id: "call", name: "read", input: {} }] },
+    { role: "system", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } }] },
+    { role: "system", content: [], output_config: null },
+    { role: "system", content: [], output_config: { effort: 1 } },
+    { role: "system", content: [], output_config: { effort: "high", format: { type: "json_schema" } } },
+    { role: "system", content: [], conversation: "secret-state" },
+    { role: "user", content: [], output_config: { effort: "high" } },
+    { role: "assistant", content: [], output_config: { effort: "high" } },
+    { role: "developer", content: [] },
+  ]) {
+    assert.equal(capture(context("github-copilot", body.model), "https://api.githubcopilot.com/v1/messages",
+      init({ ...body, messages: [...body.messages, message] })).reason, "unsupported-input-message")
+  }
+  const malformedCache = { role: "system", content: [{ type: "text", text: "Update", cache_control: { type: "ephemeral", ttl: "24h" } }] }
+  assert.equal(capture(context("github-copilot", body.model), "https://api.githubcopilot.com/v1/messages",
+    init({ ...body, messages: [...body.messages, malformedCache] })).reason, "unsupported-cache-control")
+})
+
 test("policy overrides are exact, independently inherited, validated and copied", () => {
   const options = { intervalMs: 300000, providers: { "github-copilot": { enabled: false, intervalMs: 250000,
     models: { "gpt-5.6-sol": { enabled: true, intervalMs: 200000 } } } } }
