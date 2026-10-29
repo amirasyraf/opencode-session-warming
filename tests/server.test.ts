@@ -9,6 +9,7 @@ import plugin from "../server.ts"
 import { CODEX_ENDPOINT, KEEPALIVE } from "../protocol.ts"
 import { completedResponse, requestBody } from "./helpers.ts"
 import { disposeResidents } from "../resident.ts"
+import { providers, serialize } from "./provider-fixtures.ts"
 
 const stateHome = await mkdtemp(join(tmpdir(), "warming-server-unit-"))
 const previousStateHome = process.env.XDG_STATE_HOME
@@ -161,11 +162,7 @@ test("GPT-6.x catalog aliases resolve to their API model and remain eligible", a
 for (const id of ["claude-sonnet-5.5", "claude-opus-5.5", "claude-haiku-5.5"]) test(`${id} warms native system updates through the V2 hooks without changing ordinary traffic`, async () => {
   const h = await harness()
   const ref = { providerID: "github-copilot", id, variant: "high" }
-  const body = { model: id, stream: true, max_tokens: 8192, thinking: { type: "adaptive" }, messages: [
-    { role: "user", content: [{ type: "text", text: "Fixture question" }] },
-    { role: "system", content: [{ type: "text", text: "Fixture update", cache_control: { type: "ephemeral", ttl: "5m" } }] },
-    { role: "system", content: [], output_config: { effort: "high" } },
-  ] }
+  const body = await serialize(providers.find((provider) => provider.modelID === id)!)
   try {
     await h.trigger("context", { sessionID: "root", agent: "build", model: ref, system: [], messages: [], options: {}, tools: {} })
     const request = new Request("https://api.githubcopilot.com/v1/messages", { method: "POST", body: JSON.stringify(body),

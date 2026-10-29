@@ -15,7 +15,10 @@ server-configured directory; an explicit `cli.json` entry for the same directory
 only supplies options. V1 (1.18.x) is unsupported on this branch; do not add V1
 `server()` exports. Runtime imports of `@opencode/plugin` or `effect` are
 forbidden (the host refuses them from plugin `node_modules`); use type-only
-imports. `README.md` is for humans: keep it short, task-oriented, and free of
+imports in plugin entrypoints and production modules. Test-only serializer
+fixtures may import `@opencode/ai` and `effect`, pinned to the development SDK
+baseline; these imports must never become reachable from plugin entrypoints.
+`README.md` is for humans: keep it short, task-oriented, and free of
 internal implementation contracts. `opencode.jsonc.example` and
 `cli.json.example` are the versioned configuration references; update them when
 the supported config surface changes.
@@ -283,6 +286,26 @@ combined suite. Do not run tests after every small edit. Finish with one review
 of `git status`, `git diff`, and the staged diff.
 
 The unit suite uses fake clocks, mock transports, and a fake V2 plugin context.
+`tests/provider-fixtures.ts` must construct canonical requests through the pinned
+host SDK's provider serializers and wire schemas, independently of our validator.
+`tests/provider-contracts.test.ts` exercises every supported adapter with plain,
+tool, instruction/effort-update, attachment, and combined conversations. Assert
+that the serializer emitted the intended features before checking full replay
+equality. Exercise plain/gzip/zstd bodies and provider-specific terminal/usage
+semantics; rejection tests must preserve the ordinary bytes and avoid network.
+Run the same control, cancellation, auth-failure, and late-callback lifecycle
+contracts across providers with fake clocks. Hook-level Claude tests must use
+SDK-generated bodies, not only manually constructed fixtures.
+`npm run check` includes `scripts/test-mutations.ts`: require an unmodified
+baseline pass, then prove assertion failures for removed Haiku eligibility,
+rejected native system updates, dropped replay input, and stale resident version.
+Mutate only a disposable copy, never the active checkout. These four targeted
+probes are regression evidence, not a general mutation-coverage claim.
+Keep SDK/Effect runtime imports confined to test fixtures and pin their exact
+versions to the 2.1.0 SDK baseline. No SDK runtime dependencies belong in the
+installed plugin. Do not equate baseline serializer contracts or Codex-only
+private runtime/TUI tests with live Copilot/OpenAI API validation, or with
+serializer coverage for every supported host patch.
 Do not add live provider calls to automated tests. `npm run test:runtime` and
 `npm run test:tui` require `OPENCODE_BIN` pointing at a private 2.1.x or 2.2.x binary
 (for example from `npm pack @opencode/cli-darwin-arm64@2.2.0` into a temp

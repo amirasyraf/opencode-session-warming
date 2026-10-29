@@ -9,7 +9,9 @@
   "scripts": {
     "test": "node --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm test",
+    "check": "npm run typecheck && npm test && npm run test:mutations",
+    "test:contracts": "node --test tests/provider-contracts.test.ts",
+    "test:mutations": "node scripts/test-mutations.ts",
     "compatibility:matrix": "node scripts/compatibility.ts matrix",
     "test:compatibility": "node scripts/compatibility.ts run",
     "journal": "node journal-cli.ts",
@@ -17,11 +19,13 @@
     "test:tui": "node --test tests/tui.integration.ts"
   },
   "devDependencies": {
+    "@opencode/ai": "2.1.0",
     "@opencode/plugin": "2.1.0",
     "@opencode/theme": "2.1.0",
     "@opentui/core": "0.6.6",
     "@opentui/solid": "0.6.6",
     "@types/node": "26.0.0",
+    "effect": "4.0.1",
     "solid-js": "1.9.12",
     "typescript": "5.9.3"
   }

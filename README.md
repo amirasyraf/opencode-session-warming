@@ -368,11 +368,23 @@ OPENCODE_BIN=/path/to/private/opencode-2.2.0 npm run test:tui
 npm run test:compatibility -- 2.2.0
 ```
 
-The unit suite uses fake clocks and mock transports. Runtime and TUI tests need
+The unit suite generates representative requests with OpenCode's real provider
+serializers for OpenAI API, modern/legacy Codex, Copilot GPT, and Copilot
+Sonnet/Opus/Haiku. It checks full replay preservation, tools and attachments,
+instruction/effort updates, encoding, unsafe-input rejection, response completion,
+and lifecycle controls with fake clocks and mock transports. `npm run check`
+also verifies that the tests detect four deliberately reintroduced regressions
+in disposable source copies. Run `npm run test:contracts` for the provider
+contracts alone, or `npm run test:mutations` for regression-sensitivity checks.
+
+Runtime and TUI tests need
 an explicitly supplied 2.1.x or 2.2.x binary (or use the compatibility command
 above). CI owns the multi-version matrix; ordinary local edits need
 `npm run check`, with a targeted host check when changing host-facing behavior.
 Development types stay pinned to 2.1.0 to preserve the older API baseline.
+The serializer tests use that baseline too; they do not prove compatibility
+with every newer serializer. The private runtime/TUI suites currently exercise
+Codex OAuth, not live Copilot or OpenAI API behavior.
 The integration suites run a private `opencode serve` with
 isolated HOME, XDG, `OPENCODE_CONFIG_DIR`, and `OPENCODE_DB`, a fake isolated
 ChatGPT credential, and a local mock provider behind a fixture plugin and a dead
