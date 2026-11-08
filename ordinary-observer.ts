@@ -45,10 +45,13 @@ export class OrdinaryObserver {
   private pendingBytes = 0
   private timer: ReturnType<typeof setInterval>
   private onUsage?: (sessionID: string, usage: UsageStats) => void
-  constructor(journal: Journal | undefined, onUsage?: (sessionID: string, usage: UsageStats) => void) {
+  private onFinish?: (sessionID: string, ordinaryCallID: string, finish: string) => void
+  constructor(journal: Journal | undefined, onUsage?: (sessionID: string, usage: UsageStats) => void,
+    onFinish?: (sessionID: string, ordinaryCallID: string, finish: string) => void) {
     this.journal = journal
     this.counters = journal?.counters ?? { excludedMetadata: 0, evictedMetadata: 0, unattributed: 0 }
     this.onUsage = onUsage
+    this.onFinish = onFinish
     this.timer = setInterval(() => this.expire(), 1000)
     this.timer.unref()
   }
@@ -97,6 +100,10 @@ export class OrdinaryObserver {
       const usage = normalizedUsage({ input: Number(value.uncachedInputTokens ?? 0), output: Number(value.nonReasoningOutputTokens ?? 0),
         reasoning: Number(value.reasoningTokens ?? 0), cache: { read: Number(value.cacheReadTokens ?? 0), write: Number(value.cacheWriteTokens ?? 0) } })
       if (usage) this.onUsage?.(String(value.sessionID), usage)
+    }
+    // Only attributed admitted root steps report a turn end; ambiguous attribution leaves the window unchanged.
+    if (value.event === "ordinary.message-completed" && step.ordinaryCallID && typeof value.finish === "string") {
+      this.onFinish?.(String(value.sessionID), step.ordinaryCallID, value.finish)
     }
     return true
   }

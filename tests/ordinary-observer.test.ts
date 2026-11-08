@@ -16,10 +16,11 @@ const ended = (id = "msg_a", fields: Record<string, unknown> = {}) => ({ type: "
   native: { secret: "prompt text" }, files: ["private/path.ts"], ...fields } })
 const call = { sessionID: "root", providerID: "openai", modelID: "alias", apiModelID: "native-model", at: Date.now() - 1000 }
 
-async function harness(onUsage?: (sessionID: string, usage: UsageStats) => void) {
+async function harness(onUsage?: (sessionID: string, usage: UsageStats) => void,
+  onFinish?: (sessionID: string, ordinaryCallID: string, finish: string) => void) {
   const directory = await mkdtemp(join(tmpdir(), "warming-observer-"))
   const journal = new Journal({ enabled: true, retentionDays: 365 }, () => {}, { directory })
-  const observer = new OrdinaryObserver(journal, onUsage)
+  const observer = new OrdinaryObserver(journal, onUsage, onFinish)
   return { journal, observer, async finish() {
     observer.dispose(); await journal.dispose()
     const data: EventRecord[] = []
@@ -49,6 +50,25 @@ test("root steps are attributed to their ordinary call and report normalized usa
   assert.deepEqual(usage, [["root", { uncachedInputTokens: 10, cachedTokens: 90, cacheWriteTokens: 5, outputTokens: 5 }]])
   const text = JSON.stringify(records)
   for (const leak of ["prompt text", "private/path"]) assert.equal(text.includes(leak), false)
+})
+
+test("turn ends are reported once for attributed root steps only", async () => {
+  const finishes: [string, string, string][] = []
+  const h = await harness(undefined, (...value) => finishes.push(value))
+  h.observer.classify("root", true)
+  h.observer.classify("child", false)
+  const id = h.observer.call(call, "2.1.0")
+  h.observer.event(started())
+  h.observer.event(ended("msg_a", { finish: "tool-calls" }))
+  h.observer.event(ended("msg_a", { finish: "tool-calls" }))
+  h.observer.event(started("msg_child", { sessionID: "child" }))
+  h.observer.event(ended("msg_child", { sessionID: "child" }))
+  h.observer.event(started("msg_title", { agent: "title" }))
+  h.observer.event(ended("msg_title"))
+  h.observer.event(started("msg_unattributed"))
+  h.observer.event(ended("msg_unattributed"))
+  await h.finish()
+  assert.deepEqual(finishes, [["root", id, "tool-calls"]])
 })
 
 test("children, unsupported providers, auxiliary agents and unknown roots are excluded", async () => {

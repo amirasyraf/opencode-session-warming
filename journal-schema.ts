@@ -8,7 +8,7 @@ export type Scalar = string | number | boolean
 
 const events = ["run.started", "run.ended", "journal.health", "journal.policy-observed",
   "ordinary.call-started", "ordinary.step-usage", "ordinary.message-completed",
-  "window.started", "window.captured", "window.capture-failed", "window.ended",
+  "window.started", "window.captured", "window.capture-failed", "window.ended", "window.turn-ended", "window.resumed",
   "warm.started", "warm.completed", "warm.failed", "warm.aborted", "warming.skipped",
   "warming.policy-warning", "warming.scheduled", "plugin.disabled", "diagnostics.degraded",
   "ui.status-failed", "internal.failed", "warming.user-started", "warming.user-stopped", "warming.user-extended"] as const
@@ -39,7 +39,8 @@ const numbers = new Set(["attempt", "status", "elapsedMs", "startedAt", "complet
   "inputTokens", "cachedTokens", "outputTokens", "cacheWriteTokens", "cacheWrite5mTokens", "cacheWrite1hTokens",
   "uncachedInputTokens", "cacheReadTokens", "nonReasoningOutputTokens", "reasoningTokens", "reportedCost",
   "offered", "admitted", "droppedQueue", "droppedStorage", "droppedPressure", "droppedOversize", "unconfirmedWrite",
-  "excludedMetadata", "evictedMetadata", "unattributed", "pauseStartedAt", "pauseEndedAt", "dropped"])
+  "excludedMetadata", "evictedMetadata", "unattributed", "pauseStartedAt", "pauseEndedAt", "dropped",
+  "attempted", "completed", "failed", "idleMs"])
 const booleans = new Set(["retryable", "outputLimitReached"])
 const reasons = ["unclassified", "configured-off", "unsupported-transport", "ordinary-activity", "expired", "clock-gap",
   "user-start", "user-stop", "user-extend", "awaiting-activity",
@@ -58,7 +59,7 @@ const reasons = ["unclassified", "configured-off", "unsupported-transport", "ord
   "pressure", "policy-unavailable", "unknown-option", "invalid-enabled", "invalid-debug", "invalid-duration", "invalid-interval",
   "interval-not-less-than-duration", "invalid-overrides", "invalid-journal", "invalid-journal-enabled", "invalid-journal-retention",
   "invalid-journal-max-bytes", "unsupported-content-encoding", "unsupported-input-compaction", "websocket-transport",
-  "native-warming", "publish-failed", "unsupported-opencode-version", "resume-within-ttl"]
+  "native-warming", "publish-failed", "unsupported-opencode-version", "resume-within-ttl", "ttl-elapsed"]
 const enums: Record<string, readonly string[]> = {
   reason: reasons,
   adapterID: ["codex", "openai-api", "github-copilot"], strategy: ["keepalive", "native-prewarm", "bounded-replay"],
@@ -111,4 +112,5 @@ export const diagnosticEvents: Record<string, JournalEvent> = {
   skipped: "warming.skipped", "policy-warning": "warming.policy-warning", scheduled: "warming.scheduled", disabled: "plugin.disabled",
   "logging-degraded": "diagnostics.degraded", "ui-status-failed": "ui.status-failed", "internal-error": "internal.failed",
   "warming-started": "warming.user-started", "warming-stopped": "warming.user-stopped", "warming-extended": "warming.user-extended",
+  "turn-ended": "window.turn-ended", resumed: "window.resumed",
 }

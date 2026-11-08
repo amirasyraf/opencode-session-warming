@@ -12,8 +12,8 @@
  * `scopes`, `idle`, `watchIdle`, `dispose`) is fixed. Bump RESIDENT_VERSION whenever anything else that an
  * attaching scope relies on changes: a mismatch disposes the old resident instead of adopting it.
  */
-// Invalidate residents whose engine/transport closures still use the pre-system-update validator.
-export const RESIDENT_VERSION = 2
+// Invalidate residents whose engines lack turn-end windows, TTL-bounded retries, and `turnEnded`/`resumed`.
+export const RESIDENT_VERSION = 3
 
 export type Resident = {
   readonly fingerprint: string

@@ -108,8 +108,10 @@ cleans up. It never changes your OpenCode installation or credentials.
 
 ## Configuration
 
-The defaults enable warming for a one-hour window and enable the metadata
-journal for 365 days.
+The defaults warm for up to one hour while the agent is still working (waiting
+on a tool or subagent), use a shorter automatic window once the agent has
+finished its turn and is waiting for you, and keep the metadata journal for 365
+days.
 
 ```jsonc
 {
@@ -127,9 +129,10 @@ journal for 365 days.
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | `enabled` | `true` | Enable the server plugin. |
-| `durationMs` | `3600000` | Warming window after ordinary activity or a manual start. |
+| `durationMs` | `3600000` | Warming window while the agent is still working, and after a manual start. |
+| `afterTurnDurationMs` | automatic | Shorter window once the agent's turn has ended without a tool call. |
 | `intervalMs` | automatic | Global refresh interval override. |
-| `providers` | none | Provider and exact model overrides. |
+| `providers` | none | Provider and exact model overrides of `enabled`, `intervalMs`, `durationMs`, and `afterTurnDurationMs`. |
 | `debug` | `false` | Add scheduling details to OpenCode logs. |
 | `journal.enabled` | `true` | Enable local metadata history. |
 | `journal.retentionDays` | `365` | Retention period for journal segments. |
@@ -137,7 +140,8 @@ journal for 365 days.
 
 Intervals and durations must be positive safe integers no larger than
 `2147483647` milliseconds. Unknown or invalid options disable the plugin rather
-than being silently ignored.
+than being silently ignored. An after-turn duration longer than the working
+duration is shortened to it.
 
 Overrides resolve independently as model, provider, explicit global, then
 automatic policy. Model names are exact provider API IDs (for example
@@ -159,7 +163,8 @@ Example provider overrides:
         "gpt-5.6-luna": { "intervalMs": 1680000 },
         "claude-sonnet-5": { "intervalMs": 240000 },
         "claude-opus-5": { "intervalMs": 240000 },
-        "claude-haiku-5.5": { "intervalMs": 240000 }
+        "claude-haiku-5.5": { "intervalMs": 240000 },
+        "claude-opus-5.5": { "afterTurnDurationMs": 3600000 }
       }
     }
   }
@@ -168,16 +173,25 @@ Example provider overrides:
 
 ## Automatic refresh
 
-| Request | Refresh interval | Evidence |
-| --- | --- | --- |
-| OpenAI API GPT-5.6+ | 28 minutes | OpenAI documents a 30-minute minimum. |
-| Codex OAuth and Copilot GPT-5.6+ (including GPT-6.x) | 28 minutes | Upstream behavior is assumed. |
-| Copilot Sonnet/Opus 5+ and Haiku 5.5+ | 4 minutes | Default or mixed cache markers. |
-| Copilot Sonnet/Opus 5+ and Haiku 5.5+ with only `1h` markers | 58 minutes | Requested one-hour marker. |
-| Older supported Codex models | 4 minutes | Retention is unknown. |
+| Request | Refresh interval | After-turn window | Evidence |
+| --- | --- | --- | --- |
+| OpenAI API GPT-5.6+ | 28 minutes | 28 minutes (no refresh) | OpenAI documents a 30-minute minimum. |
+| Codex OAuth and Copilot GPT-5.6+ (including GPT-6.x) | 28 minutes | 28 minutes (no refresh) | Upstream behavior is assumed. |
+| Copilot Sonnet/Opus 5+ and Haiku 5.5+ | 4 minutes | 30 minutes | Default or mixed cache markers. |
+| Copilot Sonnet/Opus 5+ and Haiku 5.5+ with only `1h` markers | 58 minutes | 58 minutes (no refresh) | Requested one-hour marker. |
+| Older supported Codex models | 4 minutes | 30 minutes | Retention is unknown. |
 
 These are scheduling policies, not cache-expiry measurements. The plugin does
 not claim a cache hit or a cost saving after a request completes.
+
+Why the after-turn window is shorter: each refresh costs a cache read of the
+whole context, and it only pays off if you come back after the cache would
+otherwise have expired. Once the agent has finished, that is uncommon, and a
+30-minute GPT cache already covers a quick reply. Five-minute Claude caches
+need refreshing to survive even a short reply; 30 minutes of refreshes stays
+below the cost of one cold cache rewrite. While the agent is waiting on a tool
+or subagent it will come back, so the full working window applies. If you know
+you will return soon, `/warming extend` keeps the current window going.
 
 ## What happens
 
@@ -186,11 +200,20 @@ not claim a cache hit or a cost saving after a request completes.
 2. The plugin captures the outgoing HTTP request from OpenCode's `http.request`
    hook, after authentication, routing, and body compression.
 3. It waits for the ordinary response body to finish or be cancelled before
-   scheduling warming. Stopping the agent keeps warming the captured input
-   until the original window expires; it does not restart the timer.
-4. A supported request is replayed directly to its provider at the selected
+   scheduling warming. Stopping the agent keeps the captured input replayable;
+   it does not restart the timer.
+4. When OpenCode reports how that model step ended, a step that called a tool
+   (including a subagent) keeps the working window. Any other ending (the
+   answer is complete, the agent was stopped, or the step failed) shortens
+   the window to the after-turn length, counted from the request start. An
+   explicit `/warming start` or `/warming extend` is never shortened.
+5. A supported request is replayed directly to its provider at the selected
    interval, until the window expires. You can extend a live window explicitly.
-5. New ordinary activity, compaction, revert, deletion, non-cancellation errors,
+6. A failed warm is retried after 30 seconds, then 1, 2, 4 minutes and so on,
+   up to the refresh interval. Once the provider's assumed cache lifetime has
+   passed since the last successful refresh, the cache is presumed cold and
+   the window ends instead of retrying.
+7. New ordinary activity, compaction, revert, deletion, non-cancellation errors,
    long sleep/resume gaps, and incompatible responses stop the snapshot.
    A retried root-model request can establish a fresh window after expiry.
 
@@ -325,7 +348,25 @@ Inspect the journal without modifying it:
 ```sh
 npm run --silent journal -- validate
 npm run --silent journal -- export --from 2026-10-01 --to 2026-11-01 --provider openai
+npm run --silent journal -- report --from 2026-10-01 --rates rates.json
 ```
+
+`report` prints per-model totals: ordinary and warm tokens, warm hits and
+misses, failures, how windows ended, how turns ended, and how often and how
+long after a turn you came back, with whether that call read from the cache.
+Return statistics only cover windows recorded by this version or later. A warm
+or returning call counts as a cache hit when more than half of its input was
+cached; that is an estimate, not proof of a refresh. Prices are not stored in
+the journal. To add cost estimates, pass a JSON file of per-million-token rates
+in any unit, keyed by provider API model ID:
+
+```json
+{ "gpt-6.1-sol": { "input": 2, "cachedInput": 0.1, "cacheWrite": 2.5, "output": 10 } }
+```
+
+`cacheWrite` defaults to the input rate. A health record is written only when a
+loss or exclusion counter changes, and `validate` counts each run that lost
+records as one warning.
 
 Set `journal.enabled` to `false` to disable persistence without disabling
 warming. Restart OpenCode after changing the setting.
@@ -345,7 +386,9 @@ rg '\[session-warming\]' ~/.local/state/opencode/session-warming/plugin.log
 - `skipped` explains why a request shape, provider, model, or session was not supported.
 - `warm-completed` means the response passed the protocol completion checks. It
   does not prove a cache refresh.
-- `warm-failed` includes a safe failure category and retry decision.
+- `warm-failed` includes a safe failure category and retry decision. A
+  `stopped` event with `ttl-elapsed` means retries ran past the assumed cache
+  lifetime, so the window ended.
 - `skipped` with `websocket-transport` means OpenAI is still on WebSockets; set
   the provider transport to `http`.
 

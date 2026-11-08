@@ -87,7 +87,7 @@ test("Codex retains the legacy strategy but newer models resolve a 28-minute int
 for (const model of ["claude-sonnet-5", "claude-haiku-5.5", "claude-haiku-5-5"]) test(`${model} preserves images, signatures, tool selection, thinking and mixed TTLs`, async () => {
   const body = claude(model)
   assert.ok(supportsModel(context("github-copilot", model)))
-  assert.deepEqual(initialProfile(model), { intervalMs: 240000, ttlMs: 300000, ttlEvidence: "upstream-assumed" })
+  assert.deepEqual(initialProfile(model), { intervalMs: 240000, ttlMs: 300000, ttlEvidence: "upstream-assumed", afterTurnDurationMs: 1800000 })
   const result = capture(context("github-copilot", body.model), "https://api.githubcopilot.com/v1/messages", init(body))
   assert.ok(result.replay)
   assert.deepEqual(JSON.parse(result.replay.request(signal()).body as string), { ...body, max_tokens: 128 })
@@ -117,6 +117,8 @@ for (const model of ["claude-sonnet-5", "claude-haiku-5.5", "claude-haiku-5-5"])
   const oneHour = capture(context("github-copilot", body.model), "https://api.githubcopilot.com/v1/messages", init(long)).replay!
   assert.equal(oneHour.automatic.ttlMs, 3600000)
   assert.equal(oneHour.automatic.intervalMs, 3480000)
+  assert.equal(oneHour.automatic.afterTurnDurationMs, 3480000, "a one-hour cache needs no refresh after a finished turn")
+  assert.equal(result.replay.automatic.afterTurnDurationMs, 1800000)
 })
 
 for (const model of ["claude-sonnet-5", "claude-haiku-5.5", "claude-haiku-5-5"]) test(`${model} unsupported shapes fail closed without leaking data`, () => {
@@ -208,7 +210,7 @@ test("policy overrides are exact, independently inherited, validated and copied"
     models: { "gpt-5.6-sol": { enabled: true, intervalMs: 200000 } } } } }
   const config = settings(options)!
   options.providers["github-copilot"].models["gpt-5.6-sol"].intervalMs = 1
-  const auto = { intervalMs: 1680000, ttlMs: 1800000, ttlEvidence: "upstream-assumed" as const }
+  const auto = { intervalMs: 1680000, ttlMs: 1800000, ttlEvidence: "upstream-assumed" as const, afterTurnDurationMs: 1680000 }
   const exact = resolvePolicy(config, "github-copilot", "gpt-5.6-sol", auto)
   assert.equal(exact.intervalMs, 200000)
   assert.equal(exact.intervalSource, "model")
@@ -220,7 +222,23 @@ test("policy overrides are exact, independently inherited, validated and copied"
   for (const invalid of [{ providers: [] }, { models: { "gpt-6": {} } }, { providers: { "github-copilot": { ttlMs: 100 } } },
     { providers: { "github-copilot": { models: { "gpt-6/extra": {} } } } },
     { providers: { "github-copilot": { models: { "gpt-6": { intervalMs: Infinity } } } } },
-    { providers: { openai: { enabled: "yes" } } }]) assert.equal(settings(invalid), undefined)
+    { providers: { "github-copilot": { durationMs: 0 } } }, { providers: { openai: { models: { "gpt-6": { afterTurnDurationMs: 1.5 } } } } },
+    { afterTurnDurationMs: 0 }, { providers: { openai: { enabled: "yes" } } }]) assert.equal(settings(invalid), undefined)
+})
+
+test("working and after-turn durations resolve model, provider, global, then automatic; after-turn never lengthens", () => {
+  const auto = { intervalMs: 240000, ttlMs: 300000, ttlEvidence: "upstream-assumed" as const, afterTurnDurationMs: 1800000 }
+  const defaults = resolvePolicy(settings()!, "github-copilot", "claude-sonnet-5", auto)
+  assert.equal(defaults.durationMs, 3600000)
+  assert.equal(defaults.afterTurnDurationMs, 1800000)
+  const config = settings({ durationMs: 7200000, afterTurnDurationMs: 600000, providers: { "github-copilot": {
+    durationMs: 5400000, afterTurnDurationMs: 900000, models: { "claude-opus-5": { durationMs: 1200000, afterTurnDurationMs: 2400000 } } } } })!
+  const global = resolvePolicy(config, "openai", "gpt-6", auto)
+  assert.deepEqual([global.durationMs, global.afterTurnDurationMs], [7200000, 600000])
+  const provider = resolvePolicy(config, "github-copilot", "claude-sonnet-5", auto)
+  assert.deepEqual([provider.durationMs, provider.afterTurnDurationMs], [5400000, 900000])
+  const model = resolvePolicy(config, "github-copilot", "claude-opus-5", auto)
+  assert.deepEqual([model.durationMs, model.afterTurnDurationMs], [1200000, 1200000], "after-turn is clamped to the working window")
 })
 
 test("V2 Copilot plan hosts are accepted; enterprise and custom hosts stay unsupported; GPT-6.x stays eligible", () => {

@@ -67,6 +67,20 @@ test("journal rotates private segments, preserves history on shutdown, and recor
   } finally { await journal.dispose(); await rm(root, { recursive: true, force: true }) }
 })
 
+test("periodic health records are written only when a loss or exclusion counter changes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "warming-journal-health-"))
+  const journal = new Journal(options, () => {}, { directory: root, heartbeatMs: 10 })
+  try {
+    await sleep(60)
+    journal.record({ event: "not-an-allowlisted-event" })
+    journal.record({ event: "warm.started", attemptID: "throughput-only" })
+    await sleep(60)
+    await journal.dispose()
+    const health = (await records(root)).filter((record) => record.event === "journal.health")
+    assert.deepEqual(health.map((record) => record.excludedMetadata), [0, 1])
+  } finally { await journal.dispose(); await rm(root, { recursive: true, force: true }) }
+})
+
 test("manual controls and renewed windows retain earlier journal history without snapshot data", async () => {
   const root = await mkdtemp(join(tmpdir(), "warming-journal-controls-"))
   const journal = new Journal(options, () => {}, { directory: root })
@@ -77,8 +91,14 @@ test("manual controls and renewed windows retain earlier journal history without
     journal.diagnostic({ event: "window-started", sessionID: "root", windowID: "fresh", reason: "user-start" })
     journal.diagnostic({ event: "warming-started", sessionID: "root", windowID: "fresh", reason: "user-start", authorization: "secret" })
     journal.diagnostic({ event: "warming-extended", sessionID: "root", windowID: "fresh", reason: "user-extend", durationMs: 300000, expiresAt: 900000 })
+    journal.diagnostic({ event: "turn-ended", sessionID: "root", windowID: "fresh", finish: "stop", durationMs: 1800000, model: "gpt-6.1-sol" })
+    journal.diagnostic({ event: "stopped", sessionID: "root", windowID: "fresh", reason: "ttl-elapsed", attempted: 3, completed: 1, failed: 2 })
+    journal.diagnostic({ event: "resumed", sessionID: "root", windowID: "fresh", ordinaryCallID: "next", idleMs: 2400000, reason: "ttl-elapsed", finish: "stop" })
     await journal.dispose()
     const data = await records(root)
+    assert.equal(data.find((item) => item.event === "window.turn-ended")?.apiModelID, "gpt-6.1-sol")
+    assert.deepEqual(data.filter((item) => item.event === "window.ended" && item.reason === "ttl-elapsed").map((item) => [item.attempted, item.completed, item.failed]), [[3, 1, 2]])
+    assert.equal(data.find((item) => item.event === "window.resumed")?.idleMs, 2400000)
     assert.equal(data.filter((item) => item.event === "window.started").length, 2)
     assert.equal(data.find((item) => item.event === "warming.user-stopped")?.reason, "user-stop")
     assert.equal(data.find((item) => item.event === "warming.user-started")?.windowID, "fresh")

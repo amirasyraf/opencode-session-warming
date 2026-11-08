@@ -2,7 +2,7 @@ import { object } from "./protocol.ts"
 import { DAY_MS } from "./journal-schema.ts"
 import type { JournalOptions } from "./journal-schema.ts"
 
-export type Override = { enabled?: boolean; intervalMs?: number }
+export type Override = { enabled?: boolean; intervalMs?: number; durationMs?: number; afterTurnDurationMs?: number }
 export type ProviderOverride = Override & { models?: Record<string, Override> }
 export type Settings = Override & {
   enabled: boolean; durationMs: number; debug?: boolean
@@ -12,17 +12,32 @@ export type Settings = Override & {
 export type CacheProfile = {
   ttlMs?: number; ttlEvidence: "documented" | "upstream-assumed" | "requested"
   intervalMs: number; intervalSource: "automatic" | "global" | "provider" | "model"
+  /** Window length while the agent may still be working (tool calls, subagents, or an unobserved turn end). */
+  durationMs: number
+  /** Window length once the root's turn has ended without a tool call (waiting for the user). */
+  afterTurnDurationMs: number
   enabled: boolean
 }
+export type AutomaticProfile = Pick<CacheProfile, "intervalMs" | "ttlMs" | "ttlEvidence" | "afterTurnDurationMs">
 export const MAX_TIMER = 2_147_483_647
 export const GPT_TTL_MS = 1_800_000
 export const GPT_INTERVAL_MS = 1_680_000
 export const LEGACY_INTERVAL_MS = 240_000
+/**
+ * After-turn windows for long-lived caches end at the first refresh target: the provider's own lifetime already
+ * covers a quick reply, and measured returns after a finished turn are too rare to pay for refreshes. Short-lived
+ * caches keep warming for 30 minutes, below the cost of one cold rewrite at current read/write price ratios.
+ */
+export const GPT_AFTER_TURN_MS = GPT_INTERVAL_MS
+export const SHORT_AFTER_TURN_MS = 1_800_000
 const identifier = /^[A-Za-z0-9_.-]{1,160}$/
 const timer = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= MAX_TIMER
+const overrideFields = ["enabled", "intervalMs", "durationMs", "afterTurnDurationMs"]
+const invalidOverride = (value: Record<string, unknown>) => (value.enabled !== undefined && typeof value.enabled !== "boolean") ||
+  ["intervalMs", "durationMs", "afterTurnDurationMs"].some((key) => value[key] !== undefined && !timer(value[key]))
 
 export function settingsError(options: Record<string, unknown> = {}): string | undefined {
-  if (Object.keys(options).some((key) => !["enabled", "intervalMs", "durationMs", "debug", "providers", "journal"].includes(key))) return "unknown-option"
+  if (Object.keys(options).some((key) => !["enabled", "intervalMs", "durationMs", "afterTurnDurationMs", "debug", "providers", "journal"].includes(key))) return "unknown-option"
   if (options.enabled !== undefined && typeof options.enabled !== "boolean") return "invalid-enabled"
   if (options.debug !== undefined && typeof options.debug !== "boolean") return "invalid-debug"
   if (options.journal !== undefined) {
@@ -37,19 +52,18 @@ export function settingsError(options: Record<string, unknown> = {}): string | u
   if (!timer(duration)) return "invalid-duration"
   if (options.intervalMs !== undefined && !timer(options.intervalMs)) return "invalid-interval"
   if (typeof options.intervalMs === "number" && options.intervalMs >= (duration as number)) return "interval-not-less-than-duration"
+  if (options.afterTurnDurationMs !== undefined && !timer(options.afterTurnDurationMs)) return "invalid-duration"
   const providers = options.providers
   if (providers === undefined) return
   if (!object(providers) || Object.keys(providers).length > 128) return "invalid-overrides"
   for (const [providerID, value] of Object.entries(providers)) {
-    if (!identifier.test(providerID) || !object(value) || Object.keys(value).some((field) => !["enabled", "intervalMs", "models"].includes(field)) ||
-      (value.enabled !== undefined && typeof value.enabled !== "boolean") ||
-      (value.intervalMs !== undefined && !timer(value.intervalMs))) return "invalid-overrides"
+    if (!identifier.test(providerID) || !object(value) || Object.keys(value).some((field) => ![...overrideFields, "models"].includes(field)) ||
+      invalidOverride(value)) return "invalid-overrides"
     if (value.models === undefined) continue
     if (!object(value.models) || Object.keys(value.models).length > 128) return "invalid-overrides"
     for (const [modelID, model] of Object.entries(value.models)) {
-      if (!identifier.test(modelID) || !object(model) || Object.keys(model).some((field) => !["enabled", "intervalMs"].includes(field)) ||
-        (model.enabled !== undefined && typeof model.enabled !== "boolean") ||
-        (model.intervalMs !== undefined && !timer(model.intervalMs))) return "invalid-overrides"
+      if (!identifier.test(modelID) || !object(model) || Object.keys(model).some((field) => !overrideFields.includes(field)) ||
+        invalidOverride(model)) return "invalid-overrides"
     }
   }
 }
@@ -62,20 +76,24 @@ export function settings(options: Record<string, unknown> = {}): Settings | unde
     journal: { enabled: true, retentionDays: 365, ...(options.journal as object | undefined) } }
 }
 
-export function resolvePolicy(config: Settings, providerID: string, modelID: string,
-  automatic: Pick<CacheProfile, "intervalMs" | "ttlMs" | "ttlEvidence">): CacheProfile {
+export function resolvePolicy(config: Settings, providerID: string, modelID: string, automatic: AutomaticProfile): CacheProfile {
   const provider = Object.hasOwn(config.providers ?? {}, providerID) ? config.providers![providerID] : undefined
   const model = provider?.models && Object.hasOwn(provider.models, modelID) ? provider.models[modelID] : undefined
   const intervalMs = model?.intervalMs ?? provider?.intervalMs ?? config.intervalMs ?? automatic.intervalMs
   const intervalSource = model?.intervalMs !== undefined ? "model" : provider?.intervalMs !== undefined ? "provider" :
     config.intervalMs !== undefined ? "global" : "automatic"
-  return { ...automatic, intervalMs, intervalSource, enabled: config.enabled && (model?.enabled ?? provider?.enabled ?? true) }
+  const durationMs = model?.durationMs ?? provider?.durationMs ?? config.durationMs
+  // An after-turn window only ever shortens the working window.
+  const afterTurnDurationMs = Math.min(durationMs,
+    model?.afterTurnDurationMs ?? provider?.afterTurnDurationMs ?? config.afterTurnDurationMs ?? automatic.afterTurnDurationMs)
+  return { ...automatic, intervalMs, intervalSource, durationMs, afterTurnDurationMs,
+    enabled: config.enabled && (model?.enabled ?? provider?.enabled ?? true) }
 }
 
-export function initialProfile(modelID: string): Pick<CacheProfile, "intervalMs" | "ttlMs" | "ttlEvidence"> {
-  return modernGPT(modelID) ? { intervalMs: GPT_INTERVAL_MS, ttlMs: GPT_TTL_MS, ttlEvidence: "upstream-assumed" } :
-    modernClaude(modelID) ? { intervalMs: LEGACY_INTERVAL_MS, ttlMs: 300000, ttlEvidence: "upstream-assumed" } :
-      { intervalMs: LEGACY_INTERVAL_MS, ttlEvidence: "upstream-assumed" }
+export function initialProfile(modelID: string): AutomaticProfile {
+  return modernGPT(modelID) ? { intervalMs: GPT_INTERVAL_MS, ttlMs: GPT_TTL_MS, ttlEvidence: "upstream-assumed", afterTurnDurationMs: GPT_AFTER_TURN_MS } :
+    modernClaude(modelID) ? { intervalMs: LEGACY_INTERVAL_MS, ttlMs: 300000, ttlEvidence: "upstream-assumed", afterTurnDurationMs: SHORT_AFTER_TURN_MS } :
+      { intervalMs: LEGACY_INTERVAL_MS, ttlEvidence: "upstream-assumed", afterTurnDurationMs: SHORT_AFTER_TURN_MS }
 }
 
 /** Version parsing is numeric and anchored, never a substring/lexical comparison. */

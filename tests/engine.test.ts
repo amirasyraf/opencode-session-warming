@@ -138,6 +138,98 @@ test("failure attempts wait a full interval; 429 honors Retry-After", async () =
   h.engine.dispose()
 })
 
+test("failed warms back off exponentially and stop once the assumed TTL since the last refresh has elapsed", async () => {
+  const h = harness((async () => new Response(null, { status: 429 })) as typeof fetch, { intervalMs: undefined, durationMs: 10_800_000 })
+  const token = h.engine.prepare("parent", true, { providerID: "openai", modelID: "gpt-5.6-sol" })!
+  const [url, init] = ordinary()
+  init.body = JSON.stringify({ ...JSON.parse(init.body as string), model: "gpt-5.6-sol" })
+  finish(h.captures.get(token)!(url, init)!, true)
+  await h.clock.advance(1_680_000)
+  assert.equal(h.requests.length, 1)
+  await h.clock.advance(30_000)
+  assert.equal(h.requests.length, 2)
+  await h.clock.advance(59_999)
+  assert.equal(h.requests.length, 2, "the second retry waits twice as long")
+  await h.clock.advance(1)
+  assert.equal(h.requests.length, 3)
+  assert.deepEqual(h.logs.filter((log) => log.event === "warm-failed").map((log) => log.retryable), [true, true, false])
+  assert.equal(h.engine.has("parent"), false, "a retry at 31.5 minutes would only rewrite a cold cache")
+  assert.equal(h.statuses.at(-1)?.reason, "ttl-elapsed")
+  await h.clock.advance(3_600_000)
+  assert.equal(h.requests.length, 3)
+  h.engine.dispose()
+})
+
+test("a finished turn shortens the window; tool calls, other calls and user extensions keep its length", async () => {
+  const prepared = (id: string) => {
+    const h = harness(undefined, { afterTurnDurationMs: 250 })
+    const token = h.engine.prepare("parent", true, undefined, { ordinaryCallID: id })!
+    finish(h.captures.get(token)!(...ordinary())!, true)
+    return h
+  }
+  const h = prepared("call-1")
+  h.engine.turnEnded("parent", "other-call", "stop")
+  assert.equal(h.logs.some((log) => log.event === "turn-ended"), false, "only the window's own call counts")
+  h.engine.turnEnded("parent", "call-1", "stop")
+  assert.equal(h.statuses.at(-1)?.durationMs, 250)
+  assert.equal(h.statuses.at(-1)?.expiresAt, 250)
+  const ended = h.logs.find((log) => log.event === "turn-ended")!
+  assert.equal(ended.finish, "stop")
+  assert.equal(ended.expiresAt, 250)
+  await h.clock.advance(300)
+  assert.equal(h.requests.length, 2)
+  assert.equal(h.statuses.at(-1)?.phase, "expired")
+
+  const tool = prepared("call-2")
+  tool.engine.turnEnded("parent", "call-2", "tool-calls")
+  assert.equal(tool.logs.find((log) => log.event === "turn-ended")?.durationMs, 1000)
+  await tool.clock.advance(500)
+  assert.equal(tool.engine.has("parent"), true, "a tool call or subagent keeps the working window")
+  tool.engine.dispose()
+
+  const extended = prepared("call-3")
+  extended.engine.extendWarming("parent", 500)
+  extended.engine.turnEnded("parent", "call-3", "stop")
+  assert.equal(extended.statuses.at(-1)?.expiresAt, 1500, "an explicit extension is never undone")
+  extended.engine.dispose()
+
+  const late = prepared("call-4")
+  await late.clock.advance(300)
+  const sent = late.requests.length
+  late.engine.turnEnded("parent", "call-4", "length")
+  assert.equal(late.engine.has("parent"), false, "a late turn end past the after-turn length expires the window")
+  await late.clock.advance(500)
+  assert.equal(late.requests.length, sent)
+})
+
+test("window ends record warm totals and the next ordinary call records how long the cache was idle", async () => {
+  const h = harness(undefined, { afterTurnDurationMs: 250 })
+  const token = h.engine.prepare("parent", true, undefined, { ordinaryCallID: "call-1" })!
+  finish(h.captures.get(token)!(...ordinary())!, true)
+  h.engine.recordOrdinaryUsage("parent", { uncachedInputTokens: 10, cachedTokens: 1000 })
+  h.engine.turnEnded("parent", "call-1", "stop")
+  await h.clock.advance(400)
+  const ended = h.logs.find((log) => log.event === "stopped" && log.reason === "expired")!
+  assert.deepEqual([ended.attempted, ended.completed, ended.failed, ended.inputTokens, ended.cachedTokens, ended.finish],
+    [2, 2, 0, 200, 180, "stop"], "totals cover warm requests only")
+  h.engine.resumed("parent", "call-2")
+  const resumed = h.logs.find((log) => log.event === "resumed")!
+  assert.equal(resumed.windowID, ended.windowID)
+  assert.equal(resumed.ordinaryCallID, "call-2")
+  assert.equal(resumed.idleMs, 200, "idle time counts from the last request assumed to refresh the cache")
+  assert.equal(resumed.reason, "expired")
+  assert.equal(resumed.attempted, 2)
+  h.engine.resumed("parent", "call-3")
+  assert.equal(h.logs.filter((log) => log.event === "resumed").length, 1, "one record per return")
+  const step = h.engine.prepare("parent", true, undefined, { ordinaryCallID: "call-4" })!
+  finish(h.captures.get(step)!(...ordinary())!, true)
+  h.engine.turnEnded("parent", "call-4", "tool-calls")
+  h.engine.prepare("parent", true, undefined, { ordinaryCallID: "call-5" })
+  h.engine.resumed("parent", "call-5")
+  assert.equal(h.logs.filter((log) => log.event === "resumed").length, 1, "agent-loop steps without warms are not returns")
+  h.engine.dispose()
+})
+
 test("non-retryable response stops until a fresh normal capture", async () => {
   for (const status of [400, 401, 403, 422]) {
     const h = harness((async () => new Response(null, { status })) as typeof fetch)

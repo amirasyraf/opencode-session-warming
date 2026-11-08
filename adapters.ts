@@ -1,10 +1,10 @@
 import { CODEX_ENDPOINT, classifyRequest, discardWarmResponse, encodedRequest, object, warmRequest } from "./protocol.ts"
 import type { Snapshot, Usage, ResponseContract } from "./protocol.ts"
-import { GPT_INTERVAL_MS, GPT_TTL_MS, LEGACY_INTERVAL_MS, modernClaude, modernGPT } from "./cache-policy.ts"
-import type { CacheProfile } from "./cache-policy.ts"
+import { GPT_AFTER_TURN_MS, GPT_INTERVAL_MS, GPT_TTL_MS, LEGACY_INTERVAL_MS, modernClaude, modernGPT, SHORT_AFTER_TURN_MS } from "./cache-policy.ts"
+import type { AutomaticProfile } from "./cache-policy.ts"
 
 export type ModelContext = { providerID: string; modelID: string }
-type Automatic = Pick<CacheProfile, "intervalMs" | "ttlMs" | "ttlEvidence">
+type Automatic = AutomaticProfile
 export type Replay = {
   adapterID: string; strategy: "keepalive" | "native-prewarm" | "bounded-replay"
   snapshot: Snapshot; automatic: Automatic
@@ -26,7 +26,7 @@ const COPILOT_HOSTS = ["https://api.githubcopilot.com", "https://api.individual.
 const COPILOT_RESPONSES = COPILOT_HOSTS.map((host) => `${host}/responses`)
 const COPILOT_MESSAGES = COPILOT_HOSTS.map((host) => `${host}/v1/messages`)
 const gptProfile = (documented = false): Automatic => ({ intervalMs: GPT_INTERVAL_MS, ttlMs: GPT_TTL_MS,
-  ttlEvidence: documented ? "documented" : "upstream-assumed" })
+  ttlEvidence: documented ? "documented" : "upstream-assumed", afterTurnDurationMs: GPT_AFTER_TURN_MS })
 
 /** Small explicit registry. Protocol resemblance alone never authorizes a provider. */
 const codex: WarmingAdapter = {
@@ -37,7 +37,8 @@ const codex: WarmingAdapter = {
     if (result.snapshot.body.model !== context.modelID) return { reason: "model-mismatch" }
     const snapshot = result.snapshot
     return { replay: { adapterID: this.id, strategy: "keepalive", snapshot,
-      automatic: modernGPT(context.modelID) ? gptProfile() : { intervalMs: LEGACY_INTERVAL_MS, ttlEvidence: "upstream-assumed" },
+      automatic: modernGPT(context.modelID) ? gptProfile() :
+        { intervalMs: LEGACY_INTERVAL_MS, ttlEvidence: "upstream-assumed", afterTurnDurationMs: SHORT_AFTER_TURN_MS },
       request: (signal) => warmRequest(snapshot, signal), drain: discardWarmResponse } }
   },
 }
@@ -76,8 +77,9 @@ function claudeProfile(body: Record<string, unknown>): Automatic {
     if (object(message) && Array.isArray(message.content)) message.content.forEach(visit)
   }
   const ttlMs = ttls.length ? Math.min(...ttls) : 300_000
-  return { ttlMs, ttlEvidence: ttls.length ? "requested" : "upstream-assumed",
-    intervalMs: ttlMs === 3_600_000 ? 3_480_000 : 240_000 }
+  const intervalMs = ttlMs === 3_600_000 ? 3_480_000 : 240_000
+  return { ttlMs, ttlEvidence: ttls.length ? "requested" : "upstream-assumed", intervalMs,
+    afterTurnDurationMs: ttlMs === 3_600_000 ? intervalMs : SHORT_AFTER_TURN_MS }
 }
 
 const copilot: WarmingAdapter = {

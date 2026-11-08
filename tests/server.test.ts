@@ -208,6 +208,20 @@ test("session events: errors, compaction, revert and deletion invalidate; interr
   await h.cleanup?.()
 })
 
+test("a root turn that ends without a tool call shrinks its window to the after-turn duration", async () => {
+  const h = await harness({ afterTurnDurationMs: 200 })
+  await h.ordinary("root")
+  assert.equal((await h.rpc("status", { sessionID: "root" })).status.durationMs, 3000)
+  const step = { sessionID: "root", assistantMessageID: "msg_turn" }
+  h.publish({ type: "session.step.started", data: { ...step, agent: "build", model, started: Date.now() } })
+  h.publish({ type: "session.step.ended", data: { ...step, finish: "stop", tokens: { input: 10, output: 1, reasoning: 0, cache: { read: 90, write: 0 } } } })
+  await sleep(20)
+  assert.equal((await h.rpc("status", { sessionID: "root" })).status.durationMs, 200)
+  await sleep(300)
+  assert.equal((await h.rpc("status", { sessionID: "root" })).status.phase, "expired")
+  await h.cleanup?.()
+})
+
 test("WebSocket handshakes are reported, and an HTTP fallback request is still captured", async () => {
   warms.length = 0
   const h = await harness()

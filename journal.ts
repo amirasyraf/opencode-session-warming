@@ -136,6 +136,7 @@ export class Journal {
   private work?: Promise<void>
   private timer?: ReturnType<typeof setTimeout>
   private heartbeat?: ReturnType<typeof setInterval>
+  private lastHealth?: string
   private closed = false
   private closing = false
   private initialized = false
@@ -161,7 +162,7 @@ export class Journal {
 
   constructor(options: JournalOptions, warn: (diagnostic: Diagnostic) => void, context: {
     directory?: string; projectID?: string; startupOnly?: boolean; startedAt?: number
-    flushMs?: number; ioMs?: number; retryMs?: number; segmentBytes?: number
+    flushMs?: number; ioMs?: number; retryMs?: number; segmentBytes?: number; heartbeatMs?: number
     write?: (file: FileHandle, buffer: Buffer) => Promise<void>
     register?: typeof registerPolicy
   } = {}) {
@@ -183,7 +184,7 @@ export class Journal {
     this.record({ event: "run.started", pluginVersion: PLUGIN_VERSION, version: SUPPORTED_OPENCODE_VERSION_RANGE,
       retentionDays: options.retentionDays, maxBytes: options.maxBytes })
     if (!this.startupOnly) {
-      this.heartbeat = setInterval(() => { this.health(); this.drain() }, 30_000)
+      this.heartbeat = setInterval(() => { this.health(); this.drain() }, context.heartbeatMs ?? 30_000)
       this.heartbeat.unref()
     }
   }
@@ -216,7 +217,16 @@ export class Journal {
       ...(value.event === "warm-completed" ? { usageSource: "provider-response" } : {}) })
   }
 
-  private health(extra: Partial<JournalData> = {}) { this.record({ event: "journal.health", ...this.counters, ...extra }) }
+  /**
+   * Periodic health records are written only when a loss/exclusion counter changed (throughput counters alone do
+   * not count); pause transitions (`extra`) always are. `run.ended` still carries the final totals.
+   */
+  private health(extra: Partial<JournalData> = {}) {
+    const key = JSON.stringify(Object.entries(this.counters).filter(([name]) => name !== "offered" && name !== "admitted"))
+    if (!Object.keys(extra).length && key === this.lastHealth) return
+    this.lastHealth = key
+    this.record({ event: "journal.health", ...this.counters, ...extra })
+  }
 
   private pause(reason: NonNullable<Journal["paused"]>) {
     if (this.paused !== reason) {

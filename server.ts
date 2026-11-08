@@ -119,7 +119,8 @@ export default {
     const registry = new StatusRegistry(diagnostic, (status) => emit ? emit(wireStatus(status), status.sessionID) : Promise.resolve())
     const publish = (status: WarmStatus) => registry.publish(status)
     resident.publishers.add(publish)
-    const ordinary = new OrdinaryObserver(journal, (id, usage) => engine.recordOrdinaryUsage(id, usage))
+    const ordinary = new OrdinaryObserver(journal, (id, usage) => engine.recordOrdinaryUsage(id, usage),
+      (id, ordinaryCallID, finish) => engine.turnEnded(id, ordinaryCallID, finish))
 
     let disposed = false
     const preparations = new Map<string, Preparation>()
@@ -176,6 +177,7 @@ export default {
           if (!current()) return
           const ordinaryCallID = ordinary.call({ sessionID: id, providerID: ref.providerID, modelID: ref.id,
             apiModelID: context.modelID, at: observedAt }, ctx.app.version)
+          engine.resumed(id, ordinaryCallID)
           if (!supportsModel(context)) {
             preparations.delete(id)
             recoveries.delete(id)

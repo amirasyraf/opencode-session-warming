@@ -66,7 +66,8 @@ const fields = new Set(["event", "sessionID", "reason", "providerID", "model", "
   "windowID", "ordinaryCallID", "userMessageID", "configuredModelID", "startedAt", "completedAt",
   "status", "elapsedMs", "nextAttemptAt", "expiresAt", "intervalMs", "durationMs", "timeoutMs", "metadataTimeoutMs",
   "inputTokens", "cachedTokens", "outputTokens", "cacheWriteTokens", "cacheWrite5mTokens", "cacheWrite1hTokens", "outputLimitReached",
-  "adapterID", "strategy", "ttlMs", "ttlEvidence", "intervalSource", "errorCategory", "errorCode", "retryable", "version", "dropped"])
+  "adapterID", "strategy", "ttlMs", "ttlEvidence", "intervalSource", "errorCategory", "errorCode", "retryable", "version", "dropped",
+  "finish", "attempted", "completed", "failed", "idleMs"])
 
 function safeDiagnostic(value: Diagnostic): Diagnostic {
   const safe: Diagnostic = { event: "diagnostic" }
@@ -84,7 +85,7 @@ function levelFor(value: Diagnostic): Level {
   if (value.event === "warm-failed" || value.event === "capture-failed" || value.event === "ui-status-failed" || value.event === "policy-warning" || value.event === "journal-degraded" ||
       (value.event === "warm-aborted" && value.reason === "request-timeout") ||
       (value.event === "skipped" && value.reason === "session-metadata-unavailable")) return "warn"
-  if (["scheduled", "warm-started", "ordinary-usage", "window-started", "window-ended"].includes(value.event) ||
+  if (["scheduled", "warm-started", "ordinary-usage", "window-started", "window-ended", "turn-ended", "resumed"].includes(value.event) ||
       (value.event === "stopped" && value.reason === "ordinary-activity")) return "debug"
   return "info"
 }

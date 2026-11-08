@@ -7,11 +7,15 @@
       "package": "/absolute/path/to/opencode-session-warming",
       "options": {
         "enabled": true,
+        // Window while the agent is still working (tools, subagents) and after a manual start.
         "durationMs": 3600000,
+        // Optional: shorter window once the agent's turn has ended (automatic per provider/model).
+        // "afterTurnDurationMs": 1800000,
         // Optional: "intervalMs": 1680000,
         "debug": false,
         "providers": {
-          // Optional provider and exact API-model overrides go here.
+          // Optional provider and exact API-model overrides of enabled, intervalMs, durationMs
+          // and afterTurnDurationMs go here.
         },
         "journal": {
           "enabled": true,

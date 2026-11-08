@@ -1,9 +1,10 @@
 import { once } from "node:events"
-import { stat } from "node:fs/promises"
+import { readFile, stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { basename, join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import { readSegment, segmentFiles } from "./journal-reader.ts"
+import { JournalReport, parseRates } from "./journal-report.ts"
 import type { EventRecord } from "./journal-schema.ts"
 
 type IO = { out(line: string): void | Promise<void>; err(line: string): void | Promise<void> }
@@ -11,6 +12,8 @@ const metadataFlags = {
   "--provider": "providerID", "--model": "modelID", "--api-model": "apiModelID",
   "--session": "sessionID", "--run": "runID", "--project": "projectID",
 } as const
+/** Counters that mean journal records were lost; exclusions and evictions are normal bounding, not loss. */
+const lossCounters = ["droppedQueue", "droppedStorage", "droppedPressure", "droppedOversize", "unconfirmedWrite"]
 
 function dateValue(value: string): number | undefined {
   let canonical: string
@@ -24,13 +27,13 @@ function dateValue(value: string): number | undefined {
 
 function options(args: string[]) {
   const [command, ...rest] = args
-  if (command !== "validate" && command !== "export") return
+  if (command !== "validate" && command !== "export" && command !== "report") return
   const flags = new Map<string, string>()
   for (let i = 0; i < rest.length; i += 2) {
     const flag = rest[i], value = rest[i + 1]
     if (!flag || !value || value.startsWith("--") || flags.has(flag) ||
-      (flag !== "--directory" && (command !== "export" ||
-        (flag !== "--from" && flag !== "--to" && !Object.hasOwn(metadataFlags, flag))))) return
+      (flag !== "--directory" && (command === "validate" || (flag === "--rates" ? command !== "report" :
+        flag !== "--from" && flag !== "--to" && !Object.hasOwn(metadataFlags, flag))))) return
     flags.set(flag, value)
   }
   const from = flags.has("--from") ? dateValue(flags.get("--from")!) : undefined
@@ -40,11 +43,21 @@ function options(args: string[]) {
   return { command, flags, from, to }
 }
 
-/** Read-only, streaming NDJSON export or structural validation. */
+/** Read-only, streaming NDJSON export, structural validation, or an aggregate warming report. */
 export async function runJournalCLI(args: string[], io: IO, defaultDirectory?: string): Promise<number> {
   const parsed = options(args)
   if (!parsed) { await io.err("invalid-arguments"); return 2 }
   const { command, flags, from, to } = parsed
+  let report: JournalReport | undefined
+  if (command === "report") {
+    let rates
+    if (flags.has("--rates")) {
+      rates = await readFile(flags.get("--rates")!, "utf8").then((text) => parseRates(JSON.parse(text)), () => undefined)
+      if (!rates) { await io.err("invalid-rates"); return 2 }
+    }
+    report = new JournalReport(rates)
+  }
+  const lossRuns = new Set<string>()
   const explicit = flags.has("--directory")
   const directory = flags.get("--directory") ?? defaultDirectory ??
     join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "opencode", "session-warming", "events")
@@ -90,11 +103,13 @@ export async function runJournalCLI(args: string[], io: IO, defaultDirectory?: s
           if (result.record) {
             const record = result.record
             summary.records++
+            // Health counters are cumulative per run: a run that lost records is one warning, not one per heartbeat.
             if (record.recordKind === "event" && ["journal.health", "run.ended"].includes(record.event) &&
-              ["droppedQueue", "droppedStorage", "droppedPressure", "droppedOversize", "unconfirmedWrite", "excludedMetadata", "evictedMetadata"]
-                .some((key) => Number(record[key]) > 0)) summary.warnings++
-            if (command === "export" && result.record.recordKind === "event" && matches(result.record))
-              await io.out(JSON.stringify(result.record))
+              lossCounters.some((key) => Number(record[key]) > 0)) lossRuns.add(record.runID)
+            if (record.recordKind === "event" && matches(record)) {
+              if (command === "export") await io.out(JSON.stringify(record))
+              else report?.add(record)
+            }
           }
         }
       }
@@ -103,8 +118,12 @@ export async function runJournalCLI(args: string[], io: IO, defaultDirectory?: s
     accessFailed = true
     await io.err("journal-access-failed")
   }
+  summary.warnings += lossRuns.size
   if (command === "validate") await io.out(JSON.stringify(summary))
-  else await io.err(JSON.stringify({ ...summary, gaps, pending }))
+  else {
+    if (report && !accessFailed) await io.out(JSON.stringify(report.result(), null, 2))
+    await io.err(JSON.stringify({ ...summary, gaps, pending, lossRuns: lossRuns.size }))
+  }
   return accessFailed ? 2 : summary.issues ? 1 : 0
 }
 

@@ -62,8 +62,8 @@ Keep responsibilities in their current modules:
 - `resident.ts`: the process-scoped, per-location resident pool that lets live windows outlive a plugin scope.
 - `status.ts`, `indicator.ts`, `tui.tsx`: in-memory status registry, observational rendering, and explicit CLI command handling.
 - `controls.ts`, `rpc.ts`: bounded, metadata-only control requests and the RPC contract.
-- `journal-schema.ts`, `journal.ts`, `journal-reader.ts`, `journal-cli.ts`:
-  allowlisted metadata persistence and read-only inspection.
+- `journal-schema.ts`, `journal.ts`, `journal-reader.ts`, `journal-cli.ts`, `journal-report.ts`:
+  allowlisted metadata persistence and read-only inspection and aggregation.
 - `ordinary-observer.ts`: live root usage attribution from `session.step.*` events without history reads.
 
 Do not replace this with a generic provider framework, persistent conversation
@@ -177,9 +177,26 @@ store, background daemon, task counter, or conversation reconstruction layer.
 - Default GPT-5.6+ refresh is 28 minutes. Claude uses 4 minutes, or 58 minutes
   for exclusively one-hour markers. Mixed TTLs use the shortest selected marker.
 - Resolve settings as model, provider, explicit global, then automatic policy.
+  `durationMs` (working window) resolves model, provider, global;
+  `afterTurnDurationMs` adds the automatic adapter value and is clamped to the
+  working window.
+- Window length follows how the window's own ordinary step ended, reported by
+  `session.step.ended|failed` through the ordinary observer and matched by
+  `ordinaryCallID`. `tool-calls` keeps the working window; any other finish
+  shortens it once to the after-turn length from the window start. Never
+  lengthen, renew, or resurrect a window this way, never shorten a window
+  fixed by an explicit start or extend, and ignore unattributed or mismatched
+  steps. Automatic after-turn length is the refresh interval for 30-minute and
+  one-hour caches (no after-turn refresh) and 30 minutes for 5-minute and
+  unknown-TTL caches; it rests on measured returns and price ratios, so do not
+  raise it without journal evidence.
 - TTLs are upstream assumptions or requested values, not expiry evidence.
 - Separate success refresh targets, based on request start, from bounded failure
   retries. A successful response or usage value does not prove a cache refresh.
+  Failure retries start at 30 s and double per consecutive failure up to the
+  interval (429 `Retry-After` may lengthen one). With a known TTL, a retry at
+  or past `freshAt + ttlMs` ends the window (`ttl-elapsed`) instead of paying
+  for a cold rewrite; unknown TTLs stay bounded by window expiry only.
 - Only an explicit output-limit terminal result qualifies as a bounded
   completion. Do not accept arbitrary truncated output.
 - Fence retries, late callbacks, expiry, disposal, and cancellation. None may
@@ -202,8 +219,8 @@ store, background daemon, task counter, or conversation reconstruction layer.
 - The control and status bridge is the `session-warming` plugin RPC (`status`, `control`, `native` methods; `status` event), called with the root session's `location`. RPC registrations are per location instance. Inputs allow only session ID, request ID, action, an optional bounded `durationMs` (accepted only for `extend`), and the native flag. Never send editor contents or authenticated snapshots.
 - The RPC response is the correlated acknowledgement. Client calls expire after five seconds; the server assigns its own deadline, rechecks liveness after asynchronous metadata lookups and before mutation, orders actions per session, bounds pending work and deduplication, and fences deletion/disposal. Duplicate request IDs cannot apply an action twice.
 - Manual stop is separate from snapshot validity. Stop aborts warming, retains the snapshot only until its existing expiry, and persists across new ordinary activity while the location's resident lives. Fresh ordinary captures remain admissible while stopped. Deletion and resident disposal clear the stopped preference; do not silently evict it to enable a session.
-- A manual start of a stopped, live state explicitly opens a new configured-duration window with new window identity and zeroed current-window statistics. Its first warm target is one interval later. Wait for ongoing ordinary transport completion. Starting an already enabled window is a no-op; absent or invalidated captures become enabled/awaiting activity, never reconstructed from history.
-- `/warming extend [duration]` lengthens the existing live window (including a manually stopped one) without resetting its window identity, snapshot, statistics, or next warm target; status `durationMs` is the extended window length. Bare `extend` adds one configured duration; explicit ASCII durations may combine strictly descending `d`/`h`/`m`/`s` units such as `1h30m`. Extensions are bounded by the safe timer limit (`duration-limit`), do not resurrect expired or invalidated state, and preserve manual-stop state. A fresh window (ordinary capture or manual start) resets the length to the configured duration.
+- A manual start of a stopped, live state explicitly opens a new working-duration window with new window identity and zeroed current-window statistics. Its first warm target is one interval later. Wait for ongoing ordinary transport completion. Starting an already enabled window is a no-op; absent or invalidated captures become enabled/awaiting activity, never reconstructed from history.
+- `/warming extend [duration]` lengthens the existing live window (including a manually stopped one) without resetting its window identity, snapshot, statistics, or next warm target; status `durationMs` is the extended window length. Bare `extend` adds one resolved working duration; explicit ASCII durations may combine strictly descending `d`/`h`/`m`/`s` units such as `1h30m`. Extensions are bounded by the safe timer limit (`duration-limit`), do not resurrect expired or invalidated state, and preserve manual-stop state. A fresh window (ordinary capture or manual start) resets the length to the resolved working duration.
 - Expiry, clock gaps, authentication failure, incompatible input, compaction, revert, and other invalidations still release snapshots and pending capture callbacks while manually stopped. Start must not resurrect them or bypass configured policy. Fence warm continuations by controller identity as well as state identity.
 - Status allowlists include manual-stop state and an idle/awaiting-activity phase. Keep stopped progress frozen and next-request timers absent. Record allowlisted user-control events and fresh-window replacements in the journal without deleting historical records.
 
@@ -234,7 +251,23 @@ store, background daemon, task counter, or conversation reconstruction layer.
 - Missing usage is unknown. OpenCode-normalized zero is not proof of upstream
   usage. Reported cost has unspecified units, never presumed USD.
 - The status bridge publishes only allowed times, counters, provider/model, policy identifiers, outcome marks, and manual-stop state (`safeStatus` on both sides). Status publication never changes warming, history, or provider requests; explicit controls use the separate `control` RPC method.
-- The journal keeps the V1 location (`$XDG_STATE_HOME/opencode/session-warming/events/`) and schema 1; new reason codes are additive. Do not change the record format without a migration plan for existing history.
+- The journal keeps the V1 location (`$XDG_STATE_HOME/opencode/session-warming/events/`) and schema 1; new reason codes, events, and allowlisted fields are additive. Do not change the record format without a migration plan for existing history.
+- Window outcomes are recorded directly rather than reconstructed: `window.ended`
+  carries the window's warm-only totals (`attempted`, `completed`, `failed`,
+  warm token sums, `finish`), `window.turn-ended` records each observed finish
+  and the resulting length, and `window.resumed` links the session's previous
+  captured window to the next ordinary root call (`ordinaryCallID`, `idleMs`
+  since the last presumed refresh) when that window ended a turn or sent warms.
+  The engine keeps only a bounded per-session summary for this; never history.
+- Periodic `journal.health` records are written only when a non-throughput
+  counter changes; pause transitions always are. `validate` counts each run with
+  loss counters (`dropped*`, `unconfirmedWrite`) as one warning; exclusions and
+  evictions are normal bounding, not loss.
+- `journal report` is read-only aggregation. Prices are never stored in the
+  journal or code; cost estimates need an explicit `--rates` file, in caller
+  units. Cache "hits" there are a >50%-cached heuristic, not refresh proof.
+  Windows without an end record (process exit, kill) are reported as
+  `unterminated`; do not synthesize end records at exit.
 
 ## Diagnostics and UI invariants
 

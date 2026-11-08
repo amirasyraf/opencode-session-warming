@@ -76,8 +76,57 @@ test("validate counts records; export streams only events with exact metadata an
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
 
+test("loss counters warn once per run; report aggregates warming economics without changing the journal", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "warming-journal-cli-"))
+  try {
+    const path = join(dir, filename())
+    await writeFile(path, lines(header(),
+      event(1, { event: "journal.health", droppedStorage: 2 }),
+      event(2, { event: "journal.health", droppedStorage: 3 }),
+      event(3, { event: "run.ended", droppedStorage: 3 }),
+      event(4, { ordinaryCallID: "call-1", uncachedInputTokens: 100, cacheReadTokens: 900, nonReasoningOutputTokens: 10 }),
+      event(5, { event: "window.started", windowID: "w1" }),
+      event(6, { event: "warm.completed", windowID: "w1", inputTokens: 1000, cachedTokens: 990, outputTokens: 5 }),
+      event(7, { event: "warm.completed", windowID: "w1", inputTokens: 1000, cachedTokens: 0, outputTokens: 5 }),
+      event(8, { event: "warm.failed", windowID: "w1", reason: "http-rate-limit" }),
+      event(9, { event: "window.turn-ended", windowID: "w1", finish: "stop" }),
+      event(10, { event: "window.ended", windowID: "w1", reason: "expired", attempted: 3 }),
+      event(11, { event: "window.resumed", windowID: "w1", ordinaryCallID: "call-2", idleMs: 2_400_000, ttlMs: 1_800_000,
+        finish: "stop", attempted: 3, reason: "expired" }),
+      event(12, { ordinaryCallID: "call-2", uncachedInputTokens: 1000, cacheReadTokens: 0 }),
+      event(13, { event: "window.started", windowID: "w2" })))
+    const before = await stat(path)
+    const valid = await invoke(["validate"], dir)
+    assert.equal(JSON.parse(valid.out[0]!).warnings, 1, "cumulative counters of one run are one warning")
+    const rates = join(dir, "..", `${basename(dir)}-rates.json`)
+    await writeFile(rates, JSON.stringify({ "api-model": { input: 2, cachedInput: 0.1, output: 10 } }))
+    try {
+      const result = await invoke(["report", "--rates", rates], dir)
+      assert.equal(result.code, 0)
+      assert.equal(JSON.parse(result.err[0]!).lossRuns, 1)
+      const report = JSON.parse(result.out.join("\n"))
+      const model = report.models["openai/api-model"]
+      assert.deepEqual(model.ordinary, { steps: 2, uncachedInputTokens: 1100, cacheReadTokens: 900, cacheWriteTokens: 0, outputTokens: 10 })
+      assert.deepEqual(model.warms, { completed: 2, failed: 1, aborted: 0, hits: 1, misses: 1, inputTokens: 2000, cachedTokens: 990,
+        cacheWriteTokens: 0, outputTokens: 10, failures: { "http-rate-limit": 1 } })
+      assert.deepEqual(model.windows, { started: 2, warmed: 1, unterminated: 1, ended: { expired: 1 }, turnEnded: { stop: 1 } })
+      assert.deepEqual(model.returns, { total: 1, afterWarming: 1, withinTtl: 0, afterTtl: 1, cacheHit: 0, cacheMiss: 1, usageUnknown: 0,
+        byFinish: { stop: 1 }, idleMinutes: { "30-60": 1 } })
+      assert.ok(Math.abs(model.cost.ordinary - 0.00239) < 1e-12)
+      assert.ok(Math.abs(model.cost.warms - 0.002219) < 1e-12)
+      assert.equal(report.cost.warms, model.cost.warms)
+      assert.equal((await invoke(["report"], dir)).code, 0)
+      await writeFile(rates, JSON.stringify({ "api-model": { input: -1, cachedInput: 0, output: 1 } }))
+      assert.deepEqual((await invoke(["report", "--rates", rates], dir)).err, ["invalid-rates"])
+      assert.deepEqual((await invoke(["report", "--rates", join(dir, "missing.json")], dir)).err, ["invalid-rates"])
+    } finally { await rm(rates, { force: true }) }
+    assert.equal((await stat(path)).mtimeMs, before.mtimeMs)
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
 test("CLI rejects bad arguments and normalized date rollovers before reading", async () => {
   const badArgs = [[], ["unknown"], ["validate", "--provider", "openai"], ["export", "--unknown", "x"],
+    ["validate", "--rates", "x"], ["export", "--rates", "x"], ["report", "--rates"], ["report", "--unknown", "x"],
     ["export", "--directory"], ["export", "--model", ""], ["export", "--from", "--to"],
     ["export", "--model", "x", "--model", "y"], ["validate", "--directory", "a", "--directory", "b"],
     ["export", "--from", "2026-02-31"], ["export", "--from", "2026-02-31T00:00:00Z"],
