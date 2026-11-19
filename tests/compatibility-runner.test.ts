@@ -11,16 +11,17 @@ test("release discovery selects baseline, latest patch of each supported minor, 
     "2.4.0-beta.1", "3.0.0", "1.19.4", "0.0.0-dev-1"])
   assert.deepEqual(matrix.include, [
     { version: "2.1.0", candidate: false }, { version: "2.1.10", candidate: false },
-    { version: "2.2.5", candidate: false }, { version: "2.3.1", candidate: true },
+    { version: "2.2.5", candidate: false }, { version: "2.3.1", candidate: false },
   ])
   assert.deepEqual(compatibilityMatrix(["2.1.0", "2.2.0"]).include.map((entry) => entry.version), ["2.1.0", "2.2.0"])
 })
 
 test("release discovery fails closed on bad registry data and invalid explicit versions", () => {
   for (const value of [null, {}, [1], ["1.19.4"], ["2.2.0"]]) assert.throws(() => compatibilityMatrix(value))
-  const published = ["2.1.0", "2.2.0", "2.3.0"]
-  assert.deepEqual(compatibilityMatrix(published, "2.3.0").include, [{ version: "2.3.0", candidate: true }])
-  for (const version of ["2.0.0", "2.3.1", "latest", "2.3.0-beta.1", "2.3.0\n", "2.03.0", "3.0.0", "2.3.0;echo injected"]) {
+  const published = ["2.1.0", "2.2.0", "2.3.0", "2.4.0"]
+  assert.deepEqual(compatibilityMatrix(published, "2.3.0").include, [{ version: "2.3.0", candidate: false }])
+  assert.deepEqual(compatibilityMatrix(published, "2.4.0").include, [{ version: "2.4.0", candidate: true }])
+  for (const version of ["2.0.0", "2.3.1", "latest", "2.4.0-beta.1", "2.3.0\n", "2.03.0", "3.0.0", "2.3.0;echo injected"]) {
     assert.throws(() => compatibilityMatrix(published, version))
   }
   assert.equal(probeVersion("2.9007199254740992.0"), false)
@@ -30,8 +31,8 @@ test("candidate staging enables exactly one candidate only in a disposable copy"
   const directory = await mkdtemp(join(tmpdir(), "warming-probe-unit-"))
   const source = join(directory, "source")
   const destination = join(directory, "probe")
-  const guard = `export const SUPPORTED_OPENCODE_VERSION_RANGE = "2.1.x or 2.2.x"
-export const isSupportedOpenCodeVersion = (version: unknown): version is string => version === "2.2.0"
+  const guard = `export const SUPPORTED_OPENCODE_VERSION_RANGE = "2.1.x, 2.2.x, or 2.3.x"
+export const isSupportedOpenCodeVersion = (version: unknown): version is string => version === "2.2.0" || version === "2.3.0"
 `
   try {
     await mkdir(join(source, "tests"), { recursive: true })
@@ -40,11 +41,12 @@ export const isSupportedOpenCodeVersion = (version: unknown): version is string 
     await writeFile(join(source, "compatibility.ts"), guard)
     await writeFile(join(source, "tests", "fixture.ts"), "export {}")
     await writeFile(join(source, "opencode.json"), "private configuration")
-    await stageProbe(source, destination, "2.3.0")
+    await stageProbe(source, destination, "2.4.0")
     const staged = await import(pathToFileURL(join(destination, "compatibility.ts")).href)
-    assert.equal(staged.isSupportedOpenCodeVersion("2.3.0"), true)
+    assert.equal(staged.isSupportedOpenCodeVersion("2.4.0"), true)
     assert.equal(staged.isSupportedOpenCodeVersion("2.2.0"), true)
-    assert.equal(staged.isSupportedOpenCodeVersion("2.3.1"), false)
+    assert.equal(staged.isSupportedOpenCodeVersion("2.3.0"), true)
+    assert.equal(staged.isSupportedOpenCodeVersion("2.4.1"), false)
     assert.equal(staged.isSupportedOpenCodeVersion("3.0.0"), false)
     assert.equal(await readFile(join(source, "compatibility.ts"), "utf8"), guard)
     assert.equal(await realpath(join(destination, "node_modules")), await realpath(join(source, "node_modules")))

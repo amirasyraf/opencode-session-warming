@@ -1,5 +1,5 @@
 {
-  // OpenCode V2 2.1.x. Merge into ~/.config/opencode/opencode.jsonc; keep your other entries.
+  // OpenCode V2 2.1.x, 2.2.x, or 2.3.x. Merge into ~/.config/opencode/opencode.jsonc; keep your other entries.
   "plugins": [
     {
       // The checkout directory (not a file). OpenCode loads server.ts from it, and the CLI

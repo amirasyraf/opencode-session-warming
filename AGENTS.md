@@ -2,7 +2,7 @@
 
 ## Read first
 
-The main branch is one OpenCode V2 (stable 2.1.x and 2.2.x) local plugin directory;
+The main branch is one OpenCode V2 (stable 2.1.x, 2.2.x, and 2.3.x) local plugin directory;
 V1 support is retired. Do not maintain a separate V1 compatibility path:
 
 - `server.ts` is the server plugin (`{ id: "session-warming", setup }`, Promise API).
@@ -141,8 +141,8 @@ store, background daemon, task counter, or conversation reconstruction layer.
 - Reject conversation-state references, provider-hosted tools, unimplemented
   input types, unsupported media, and request bodies over 16 MiB. V2 Responses
   `compaction` items (opaque `encrypted_content`), `namespace` tool groups of
-  plain function tools, and `function_call.namespace` are admitted and
-  replayed verbatim.
+  plain function tools, explicit custom tools/calls, and `function_call.namespace`
+  are admitted and replayed verbatim.
 - Preserve the complete provider input chain, including file attachments, in
   the replay. Do not strip, reconstruct, or relocate attachment content.
   Support embedded base64 PNG, JPEG, WebP, and GIF images in user messages and
@@ -340,7 +340,7 @@ installed plugin. Do not equate baseline serializer contracts or Codex-only
 private runtime/TUI tests with live Copilot/OpenAI API validation, or with
 serializer coverage for every supported host patch.
 Do not add live provider calls to automated tests. `npm run test:runtime` and
-`npm run test:tui` require `OPENCODE_BIN` pointing at a private 2.1.x or 2.2.x binary
+`npm run test:tui` require `OPENCODE_BIN` pointing at a private 2.1.x, 2.2.x, or 2.3.x binary
 (for example from `npm pack @opencode/cli-darwin-arm64@2.2.0` into a temp
 directory); never install it globally or into `~/.opencode`. They run a private
 `opencode serve` with isolated HOME/XDG, `OPENCODE_CONFIG_DIR`, `OPENCODE_DB`,

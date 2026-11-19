@@ -313,7 +313,7 @@ test("OpenCode 2.2.0 registers hooks, captures requests, and serves controls", a
 
 test("unsupported versions and invalid options register nothing", async () => {
   for (const [options, app] of [[{}, { name: "opencode", version: "1.18.30", channel: "latest" }],
-    [{}, { name: "opencode", version: "2.3.0", channel: "latest" }], [{ bogus: true }, undefined]] as const) {
+    [{}, { name: "opencode", version: "2.4.0", channel: "latest" }], [{ bogus: true }, undefined]] as const) {
     const h = await harness(options, app)
     assert.equal(h.hooks.length, 0)
     assert.equal(h.cleanup, undefined)

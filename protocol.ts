@@ -51,7 +51,13 @@ function inputItemReason(value: unknown): string | undefined {
   if (value.type === "function_call") {
     return [value.call_id, value.name, value.arguments].every((field) => typeof field === "string") ? undefined : "unsupported-input-function-call"
   }
-  if (value.type === "function_call_output") {
+  if (value.type === "custom_tool_call") {
+    return typeof value.call_id === "string" && typeof value.name === "string" && typeof value.input === "string" &&
+      (value.id === undefined || typeof value.id === "string") &&
+      Object.keys(value).every((key) => ["type", "id", "call_id", "name", "input"].includes(key))
+      ? undefined : "unsupported-input-custom-tool-call"
+  }
+  if (value.type === "function_call_output" || value.type === "custom_tool_call_output") {
     return typeof value.call_id === "string"
       ? contentReason(value.output, "unsupported-input-function-result", true) : "unsupported-input-function-result"
   }
@@ -114,13 +120,26 @@ function messageContent(value: unknown, role: unknown, nested = false): string |
   }
 }
 
-/** Declarative function tools, optionally grouped in V2 namespaces. Hosted tools stay unsupported. */
+function customToolFormat(value: unknown): boolean {
+  if (!object(value)) return false
+  if (value.type === "text") return Object.keys(value).every((key) => key === "type")
+  return value.type === "grammar" && ["lark", "regex"].includes(String(value.syntax)) && typeof value.definition === "string" &&
+    Object.keys(value).every((key) => ["type", "syntax", "definition"].includes(key))
+}
+
+/** Declarative function and custom tools, optionally grouped in V2 namespaces. Hosted tools stay unsupported. */
 function responsesTool(tool: unknown, strict: boolean, nested = false): boolean {
   if (!object(tool)) return false
   if (tool.type === "namespace" && !nested) {
     return typeof tool.name === "string" && (tool.description === undefined || typeof tool.description === "string") &&
       Array.isArray(tool.tools) && tool.tools.every((item) => responsesTool(item, strict, true)) &&
       Object.keys(tool).every((key) => ["type", "name", "description", "tools"].includes(key))
+  }
+  if (tool.type === "custom" && !nested) {
+    return typeof tool.name === "string" && (tool.description === undefined || typeof tool.description === "string") &&
+      (tool.format === undefined || customToolFormat(tool.format)) && (tool.parameters === undefined || object(tool.parameters)) &&
+      (tool.strict === undefined || typeof tool.strict === "boolean") && (tool.format !== undefined || tool.parameters !== undefined) &&
+      Object.keys(tool).every((key) => ["type", "name", "description", "format", "parameters", "strict"].includes(key))
   }
   return tool.type === "function" && typeof tool.name === "string" && object(tool.parameters) &&
     (!strict || Object.keys(tool).every((key) => ["type", "name", "description", "parameters", "strict"].includes(key)))

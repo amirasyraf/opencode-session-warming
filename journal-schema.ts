@@ -51,7 +51,7 @@ const reasons = ["unclassified", "configured-off", "unsupported-transport", "ord
   "http-401", "http-403", "http-422", "refresh", "retry", "interval-exceeds-ttl", "session-metadata-unavailable",
   "unsupported-session-version", "unsupported-provider", "unsupported-endpoint", "unsupported-model", "model-mismatch",
   "unsupported-input", "unsupported-input-item", "unsupported-input-message", "unsupported-input-image", "unsupported-input-file",
-  "unsupported-input-audio", "unsupported-input-function-call", "unsupported-input-function-result", "unsupported-input-reasoning",
+  "unsupported-input-audio", "unsupported-input-function-call", "unsupported-input-custom-tool-call", "unsupported-input-function-result", "unsupported-input-reasoning",
   "unsupported-configuration-update", "unsupported-method", "unsupported-body-type", "request-too-large", "missing-bearer-auth",
   "unsupported-content-type", "non-streaming-request", "stateful-request", "server-background", "unsupported-modality",
   "provider-prewarm", "unsupported-system", "unsupported-output-limit", "unsupported-thinking-budget", "unsupported-cache-control",

@@ -241,6 +241,24 @@ test("V2 Responses shapes: opaque compaction items, namespaces and namespaced ca
   ]) assert.equal(captureRequest(url, { ...init, body: JSON.stringify({ ...requestBody, ...change }) }), undefined, JSON.stringify(change))
 })
 
+test("OpenCode 2.3 custom tools and calls are preserved without admitting hosted tools", () => {
+  const custom = { type: "custom", name: "patch", description: "Apply a patch", format: { type: "grammar", syntax: "lark", definition: "start: /.+/" },
+    parameters: { type: "object", properties: {} }, strict: false }
+  const input = [...requestBody.input, { type: "custom_tool_call", id: "ctc_1", call_id: "call_1", name: "patch", input: "*** Begin Patch" },
+    { type: "custom_tool_call_output", call_id: "call_1", output: "applied" }]
+  const [url, init] = ordinary({ ...requestBody, input, tools: [custom] })
+  const snapshot = captureRequest(url, init)!
+  const warm = JSON.parse(warmRequest(snapshot, new AbortController().signal).body as string)
+  assert.deepEqual(warm.input.slice(0, -1), input)
+  assert.deepEqual(warm.tools, [custom])
+  for (const tool of [
+    { ...custom, format: { type: "grammar", syntax: "other", definition: "start: /.+/" } },
+    { ...custom, format: { type: "grammar", syntax: "lark" } },
+    { ...custom, parameters: "not a schema" },
+    { ...custom, type: "web_search" },
+  ]) assert.equal(captureRequest(url, { ...init, body: JSON.stringify({ ...requestBody, tools: [tool] }) }), undefined)
+})
+
 test("encoded ordinary bodies replay with the same content encoding; unknown encodings are skipped", async () => {
   const { zstdDecompressSync, gunzipSync } = await import("node:zlib")
   for (const encoding of ["zstd", "gzip"] as const) {

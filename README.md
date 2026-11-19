@@ -2,7 +2,7 @@
 
 [![Compatibility](https://github.com/amirasyraf/opencode-session-warming/actions/workflows/compatibility.yml/badge.svg?branch=main)](https://github.com/amirasyraf/opencode-session-warming/actions/workflows/compatibility.yml)
 
-An OpenCode V2 (2.1.x and 2.2.x) plugin that keeps supported root-session prompt
+An OpenCode V2 (2.1.x, 2.2.x, and 2.3.x) plugin that keeps supported root-session prompt
 prefixes warm while OpenCode is waiting on a foreground subagent or
 long-running tool. It also adds a warming indicator and session controls to the
 terminal UI. The main branch targets V2 only; OpenCode 1.18.x is no longer
@@ -18,14 +18,14 @@ the computer must stay awake and connected.
 
 ## Supported setup
 
-- OpenCode 2.1.x and 2.2.x stable releases; other versions remain disabled until verified
+- OpenCode 2.1.x, 2.2.x, and 2.3.x stable releases; other versions remain disabled until verified
 - OpenAI ChatGPT/Codex OAuth over the built-in `openai` provider, with the
   provider transport set to HTTP (see below)
 - OpenAI API GPT-5.6+ Responses at `api.openai.com/v1/responses`
 - GitHub Copilot GPT-5.6+ Responses (unit-tested only on V2)
 - GitHub Copilot Claude Sonnet/Opus 5+ and Haiku 5.5+ Messages with adaptive or disabled thinking
   (unit-tested only on V2)
-- Text, ordinary function tools, and the complete provider input chain, including file attachments and embedded base64 PNG/JPEG/WebP/GIF images
+- Text, ordinary function and custom tools, and the complete provider input chain, including file attachments and embedded base64 PNG/JPEG/WebP/GIF images
 - Root sessions only
 
 GPT-6.x models such as `gpt-6.1-sol` are eligible: model checks are numeric
@@ -86,7 +86,7 @@ local config because it may contain other plugins.
 
 ## OpenCode upgrades
 
-Stable patches within 2.1.x and 2.2.x are allowed automatically. SDK dependency
+Stable patches within 2.1.x, 2.2.x, and 2.3.x are allowed automatically. SDK dependency
 pins are development baselines, not pins on your installed OpenCode.
 
 The [Compatibility workflow](https://github.com/amirasyraf/opencode-session-warming/actions/workflows/compatibility.yml)
@@ -421,7 +421,7 @@ in disposable source copies. Run `npm run test:contracts` for the provider
 contracts alone, or `npm run test:mutations` for regression-sensitivity checks.
 
 Runtime and TUI tests need
-an explicitly supplied 2.1.x or 2.2.x binary (or use the compatibility command
+an explicitly supplied 2.1.x, 2.2.x, or 2.3.x binary (or use the compatibility command
 above). CI owns the multi-version matrix; ordinary local edits need
 `npm run check`, with a targeted host check when changing host-facing behavior.
 Development types stay pinned to 2.1.0 to preserve the older API baseline.
