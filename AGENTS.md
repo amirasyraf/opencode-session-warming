@@ -29,7 +29,8 @@ here instead of expanding the README.
 
 The plugin warms root-session OpenAI API/Codex OAuth and GitHub Copilot HTTP
 requests. Supported paths are API/Copilot GPT-5.6+ (including GPT-6.x)
-Responses, Copilot Sonnet / Opus 5+ and Haiku 5.5+ Messages, and legacy Codex. Other
+Responses at the explicit plan-host `/v1/responses` or legacy `/responses` paths,
+Copilot Sonnet / Opus 5+ and Haiku 5.5+ Messages, and legacy Codex. Other
 providers, Chat Completions, enterprise/custom endpoints, WebSockets,
 provider-hosted tools, and stateful provider conversations are unsupported. Do
 not silently enable or force a transport, and never change user credentials or

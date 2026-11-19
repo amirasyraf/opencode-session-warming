@@ -59,7 +59,7 @@ test("Copilot GPT keeps the prefix and headers; rejection never escalates to an 
     input: [{ role: "user", content: [{ type: "input_text", text: "Read this file" },
       { type: "input_file", file_id: "provider-file" }] }] }
   const original = init(body)
-  const result = capture(context("github-copilot", body.model), "https://api.githubcopilot.com/responses", original)
+  const result = capture(context("github-copilot", body.model), "https://api.githubcopilot.com/v1/responses", original)
   assert.ok(result.replay)
   const request = result.replay.request(signal())
   assert.deepEqual(JSON.parse(request.body as string), { ...body, tool_choice: "none", store: false })

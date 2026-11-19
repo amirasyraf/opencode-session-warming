@@ -22,7 +22,7 @@ the computer must stay awake and connected.
 - OpenAI ChatGPT/Codex OAuth over the built-in `openai` provider, with the
   provider transport set to HTTP (see below)
 - OpenAI API GPT-5.6+ Responses at `api.openai.com/v1/responses`
-- GitHub Copilot GPT-5.6+ Responses (unit-tested only on V2)
+- GitHub Copilot GPT-5.6+ Responses at the plan host's `/v1/responses` endpoint (unit-tested only on V2)
 - GitHub Copilot Claude Sonnet/Opus 5+ and Haiku 5.5+ Messages with adaptive or disabled thinking
   (unit-tested only on V2)
 - Text, ordinary function and custom tools, and the complete provider input chain, including file attachments and embedded base64 PNG/JPEG/WebP/GIF images

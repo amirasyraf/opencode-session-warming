@@ -13,8 +13,8 @@
  * attaching scope relies on changes: a mismatch disposes the old resident instead of adopting it.
  */
 // Invalidate residents whose engines lack turn-end windows, TTL-bounded retries, and `turnEnded`/`resumed`,
-// or whose engine/transport closures still use the pre-2.3 custom-tool validator.
-export const RESIDENT_VERSION = 3
+// or whose engine/transport/adapter closures predate the 2.3 custom-tool and Copilot endpoint support.
+export const RESIDENT_VERSION = 4
 
 export type Resident = {
   readonly fingerprint: string

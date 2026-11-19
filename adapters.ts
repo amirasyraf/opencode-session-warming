@@ -23,7 +23,7 @@ const OPENAI_ENDPOINT = "https://api.openai.com/v1/responses"
 // OpenCode V2 uses the API host advertised by the Copilot token (individual/business plans) or the default host.
 // Enterprise and custom endpoints stay unsupported.
 const COPILOT_HOSTS = ["https://api.githubcopilot.com", "https://api.individual.githubcopilot.com", "https://api.business.githubcopilot.com"]
-const COPILOT_RESPONSES = COPILOT_HOSTS.map((host) => `${host}/responses`)
+const COPILOT_RESPONSES = COPILOT_HOSTS.flatMap((host) => [`${host}/responses`, `${host}/v1/responses`])
 const COPILOT_MESSAGES = COPILOT_HOSTS.map((host) => `${host}/v1/messages`)
 const gptProfile = (documented = false): Automatic => ({ intervalMs: GPT_INTERVAL_MS, ttlMs: GPT_TTL_MS,
   ttlEvidence: documented ? "documented" : "upstream-assumed", afterTurnDurationMs: GPT_AFTER_TURN_MS })

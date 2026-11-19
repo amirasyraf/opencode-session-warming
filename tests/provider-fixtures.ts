@@ -13,7 +13,7 @@ export const providers = [
   { name: "OpenAI API", providerID: "openai", modelID: "gpt-6.1-sol", url: "https://api.openai.com/v1/responses", strategy: "native-prewarm" },
   { name: "Codex modern", providerID: "openai", modelID: "gpt-6.1-sol", url: CODEX_ENDPOINT, strategy: "keepalive" },
   { name: "Codex legacy", providerID: "openai", modelID: "gpt-5.3-codex", url: CODEX_ENDPOINT, strategy: "keepalive" },
-  { name: "Copilot GPT", providerID: "github-copilot", modelID: "gpt-6.1-sol", url: "https://api.githubcopilot.com/responses", strategy: "bounded-replay" },
+  { name: "Copilot GPT", providerID: "github-copilot", modelID: "gpt-6.1-sol", url: "https://api.githubcopilot.com/v1/responses", strategy: "bounded-replay" },
   ...["sonnet", "opus", "haiku"].map((family) => ({ name: `Copilot ${family}`, providerID: "github-copilot",
     modelID: `claude-${family}-5.5`, url: "https://api.githubcopilot.com/v1/messages", strategy: "bounded-replay" as const })),
 ] satisfies Array<{ name: string; providerID: string; modelID: string; url: string; strategy: Replay["strategy"] }>
