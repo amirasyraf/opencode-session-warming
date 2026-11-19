@@ -12,9 +12,8 @@
  * `scopes`, `idle`, `watchIdle`, `dispose`) is fixed. Bump RESIDENT_VERSION whenever anything else that an
  * attaching scope relies on changes: a mismatch disposes the old resident instead of adopting it.
  */
-// Invalidate residents whose engines lack turn-end windows, TTL-bounded retries, and `turnEnded`/`resumed`,
-// or whose engine/transport/adapter closures predate the 2.3 custom-tool and Copilot endpoint support.
-export const RESIDENT_VERSION = 4
+// Reload must discard adapter closures that reject GitHub's enterprise Copilot plan host.
+export const RESIDENT_VERSION = 5
 
 export type Resident = {
   readonly fingerprint: string

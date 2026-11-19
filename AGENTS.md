@@ -31,13 +31,22 @@ The plugin warms root-session OpenAI API/Codex OAuth and GitHub Copilot HTTP
 requests. Supported paths are API/Copilot GPT-5.6+ (including GPT-6.x)
 Responses at the explicit plan-host `/v1/responses` or legacy `/responses` paths,
 Copilot Sonnet / Opus 5+ and Haiku 5.5+ Messages, and legacy Codex. Other
-providers, Chat Completions, enterprise/custom endpoints, WebSockets,
+providers, Chat Completions, custom GitHub Enterprise domains/proxies, WebSockets,
 provider-hosted tools, and stateful provider conversations are unsupported. Do
 not silently enable or force a transport, and never change user credentials or
 provider settings: OpenAI warming requires the user's own
 `providers.openai.settings.transport: "http"`; WebSocket use is only observed
 (`experimental.ws.handshake`, no mutation) and reported as
 `websocket-transport`.
+
+Copilot endpoint admission is an exact HTTPS allowlist: `api.githubcopilot.com`,
+`api.individual.githubcopilot.com`, `api.business.githubcopilot.com`, and
+`api.enterprise.githubcopilot.com`. The last is GitHub's hosted enterprise plan,
+not an arbitrary GitHub Enterprise domain. Preserve the captured URL; admit only
+`/responses` and `/v1/responses` for GPT and `/v1/messages` for Claude, without
+queries, host suffix matching, or credential/routing changes. Start-before-capture
+regressions must cover both GPT and Claude on the hosted enterprise plan and assert
+the transition to waiting plus complete replay equality through the HTTP hooks.
 
 Claude eligibility uses numeric family floors: Sonnet/Opus 5+ and Haiku 5.5+,
 including dotted and dashed minor versions. Older Haiku stays unsupported;

@@ -140,7 +140,7 @@ for (const model of ["claude-sonnet-5", "claude-haiku-5.5", "claude-haiku-5-5"])
 
 test("Haiku uses only Copilot Messages and preserves disabled thinking", () => {
   const body = { ...claude("claude-haiku-5.5"), thinking: { type: "disabled" } }
-  for (const host of ["https://api.githubcopilot.com", "https://api.individual.githubcopilot.com", "https://api.business.githubcopilot.com"]) {
+  for (const host of ["https://api.githubcopilot.com", "https://api.individual.githubcopilot.com", "https://api.business.githubcopilot.com", "https://api.enterprise.githubcopilot.com"]) {
     const result = capture(context("github-copilot", body.model), `${host}/v1/messages`, init(body))
     assert.ok(result.replay, host)
     assert.equal(result.replay.strategy, "bounded-replay")
@@ -153,7 +153,7 @@ test("Haiku uses only Copilot Messages and preserves disabled thinking", () => {
   }
   assert.equal(supportsModel(context("anthropic", body.model)), false)
   assert.equal(capture(context("openai", body.model), "https://api.openai.com/v1/responses", init(body)).reason, "unsupported-model")
-  assert.equal(capture(context("github-copilot", body.model), "https://api.enterprise.githubcopilot.com/v1/messages", init(body)).reason, "unsupported-endpoint")
+  assert.equal(capture(context("github-copilot", body.model), "https://copilot-api.example.com/v1/messages", init(body)).reason, "unsupported-endpoint")
 })
 
 for (const model of ["claude-sonnet-5.5", "claude-opus-5.5", "claude-haiku-5.5"]) test(`${model} preserves native system and effort updates in the complete replay prefix`, () => {
@@ -241,12 +241,20 @@ test("working and after-turn durations resolve model, provider, global, then aut
   assert.deepEqual([model.durationMs, model.afterTurnDurationMs], [1200000, 1200000], "after-turn is clamped to the working window")
 })
 
-test("V2 Copilot plan hosts are accepted; enterprise and custom hosts stay unsupported; GPT-6.x stays eligible", () => {
+test("V2 Copilot plan hosts include GitHub's enterprise plan; custom hosts stay unsupported; GPT-6.x stays eligible", () => {
   const body = { ...requestBody, model: "gpt-5.6-sol" }
-  for (const host of ["https://api.individual.githubcopilot.com", "https://api.business.githubcopilot.com"]) {
-    assert.ok(capture(context(), `${host}/responses`, init(body)).replay, host)
+  for (const host of ["https://api.githubcopilot.com", "https://api.individual.githubcopilot.com", "https://api.business.githubcopilot.com", "https://api.enterprise.githubcopilot.com"]) {
+    for (const path of ["/responses", "/v1/responses"]) {
+      const url = `${host}${path}`
+      const original = init(body)
+      const result = capture(context(), url, original)
+      assert.ok(result.replay, `${url}: ${result.reason}`)
+      assert.equal(result.replay.snapshot.url, url, "replay retains the captured endpoint")
+      assert.equal(original.body, JSON.stringify(body))
+      assert.equal(capture(context(), `${url}?other=1`, original).reason, "unsupported-endpoint")
+    }
   }
-  for (const host of ["https://api.enterprise.githubcopilot.com", "https://copilot-api.example.com"]) {
+  for (const host of ["https://copilot-api.example.com", "https://api.enterprise.githubcopilot.com.example.com", "http://api.enterprise.githubcopilot.com"]) {
     assert.equal(capture(context(), `${host}/responses`, init(body)).reason, "unsupported-endpoint", host)
   }
   for (const id of ["gpt-6.1-sol", "gpt-6-luna", "gpt-6-astra"]) {

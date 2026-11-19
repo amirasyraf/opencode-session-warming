@@ -32,7 +32,9 @@ GPT-6.x models such as `gpt-6.1-sol` are eligible: model checks are numeric
 (`gpt-5.6` and newer), and catalog aliases such as `gpt-6.1-sol-fast` resolve to
 their provider API model first.
 
-The plugin skips other providers, Copilot enterprise/custom endpoints, Chat
+Copilot supports GitHub's default, individual, business, and enterprise plan hosts, including `api.enterprise.githubcopilot.com`. Both `/responses` and `/v1/responses` are accepted for GPT; Claude uses `/v1/messages`.
+
+The plugin skips other providers, custom GitHub Enterprise domains and proxy endpoints, Chat
 Completions, WebSocket traffic, provider-managed conversations, hosted tools,
 audio, remote images, and unsupported request shapes. Child activity does not
 reset the root session's timer.

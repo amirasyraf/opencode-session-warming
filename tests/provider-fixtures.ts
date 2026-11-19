@@ -16,6 +16,8 @@ export const providers = [
   { name: "Copilot GPT", providerID: "github-copilot", modelID: "gpt-6.1-sol", url: "https://api.githubcopilot.com/v1/responses", strategy: "bounded-replay" },
   ...["sonnet", "opus", "haiku"].map((family) => ({ name: `Copilot ${family}`, providerID: "github-copilot",
     modelID: `claude-${family}-5.5`, url: "https://api.githubcopilot.com/v1/messages", strategy: "bounded-replay" as const })),
+  { name: "Copilot enterprise GPT", providerID: "github-copilot", modelID: "gpt-6.1-sol", url: "https://api.enterprise.githubcopilot.com/responses", strategy: "bounded-replay" },
+  { name: "Copilot enterprise Opus", providerID: "github-copilot", modelID: "claude-opus-5.5", url: "https://api.enterprise.githubcopilot.com/v1/messages", strategy: "bounded-replay" },
 ] satisfies Array<{ name: string; providerID: string; modelID: string; url: string; strategy: Replay["strategy"] }>
 export type ProviderCase = typeof providers[number]
 export type Body = Record<string, unknown>

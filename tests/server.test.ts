@@ -36,6 +36,9 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   warms.push({ url: String(input), headers, body: JSON.parse(text) })
   if (String(input).endsWith("/v1/messages")) return new Response(JSON.stringify({ type: "message", stop_reason: "max_tokens",
     content: [], usage: { input_tokens: 100, cache_read_input_tokens: 90, output_tokens: 128 } }))
+  if (new URL(String(input)).hostname === "api.enterprise.githubcopilot.com") return new Response(JSON.stringify({
+    object: "response", status: "incomplete", incomplete_details: { reason: "max_output_tokens" },
+    usage: { input_tokens: 100, output_tokens: 128 } }))
   return completedResponse()
 }) as typeof fetch
 
@@ -183,6 +186,37 @@ for (const id of ["claude-sonnet-5.5", "claude-opus-5.5", "claude-haiku-5.5"]) t
     assert.ok(status.completed > 0)
     assert.equal(status.failed, 0)
     assert.equal(status.reason, undefined)
+  } finally { await h.cleanup?.() }
+})
+
+for (const id of ["gpt-6.1-sol", "claude-opus-5.5"]) test(`starting an existing root captures and warms ${id} on GitHub's enterprise plan host`, async () => {
+  const h = await harness({}, { name: "opencode", version: "2.3.2", channel: "latest" })
+  const provider = providers.find((provider) => provider.providerID === "github-copilot" && provider.modelID === id)!
+  const body = await serialize(provider)
+  const ref = { providerID: "github-copilot", id, variant: "default" }
+  const url = `https://api.enterprise.githubcopilot.com${id.startsWith("claude-") ? "/v1/messages" : "/responses"}`
+  try {
+    await h.rpc("control", { requestID: "enterprise-stop", sessionID: "root", action: "stop" })
+    assert.equal((await h.rpc("control", { requestID: "enterprise-start", sessionID: "root", action: "start" })).result, "awaiting-activity")
+    await h.trigger("context", { sessionID: "root", agent: "build", model: ref, system: [], messages: [], options: {}, tools: {} })
+    const request = new Request(url, { method: "POST", body: JSON.stringify(body),
+      headers: { authorization: "Bearer test-only", "content-type": "application/json", "session-id": "root" } })
+    const event = { sessionID: "root", agent: "build", model: ref, kind: "primary", request }
+    assert.equal((await h.trigger("http.request", event)).request, request)
+    assert.equal(request.bodyUsed, false)
+    const observed = await h.trigger("http.response", { ...event, response: completedResponse() })
+    await observed.response.text()
+    const captured = (await h.rpc("status", { sessionID: "root" })).status
+    assert.equal(captured.phase, "waiting")
+    assert.equal(captured.reason, undefined)
+    assert.equal(captured.manualStopped, false)
+    await sleep(180)
+    const replay = h.warmsFor("root")[0]
+    assert.ok(replay)
+    assert.equal(replay.url, url)
+    assert.deepEqual(replay.body, id.startsWith("claude-") ? { ...body, max_tokens: 128 } :
+      { ...body, max_output_tokens: 128, tool_choice: "none", store: false })
+    assert.ok((await h.rpc("status", { sessionID: "root" })).status.completed > 0)
   } finally { await h.cleanup?.() }
 })
 

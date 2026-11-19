@@ -20,9 +20,10 @@ export type WarmingAdapter = {
   capture(context: ModelContext, url: string, init: RequestInit): CaptureResult
 }
 const OPENAI_ENDPOINT = "https://api.openai.com/v1/responses"
-// OpenCode V2 uses the API host advertised by the Copilot token (individual/business plans) or the default host.
-// Enterprise and custom endpoints stay unsupported.
-const COPILOT_HOSTS = ["https://api.githubcopilot.com", "https://api.individual.githubcopilot.com", "https://api.business.githubcopilot.com"]
+// OpenCode uses GitHub's advertised plan host, including the GitHub-hosted enterprise plan.
+// This exact allowlist does not authorize custom GitHub Enterprise domains or proxies.
+const COPILOT_HOSTS = ["https://api.githubcopilot.com", "https://api.individual.githubcopilot.com", "https://api.business.githubcopilot.com",
+  "https://api.enterprise.githubcopilot.com"]
 const COPILOT_RESPONSES = COPILOT_HOSTS.flatMap((host) => [`${host}/responses`, `${host}/v1/responses`])
 const COPILOT_MESSAGES = COPILOT_HOSTS.map((host) => `${host}/v1/messages`)
 const gptProfile = (documented = false): Automatic => ({ intervalMs: GPT_INTERVAL_MS, ttlMs: GPT_TTL_MS,
